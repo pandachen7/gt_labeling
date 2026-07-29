@@ -1,0 +1,312 @@
+"""驗收(GUI 層,offscreen):真的開資料夾、真的用滑鼠事件改框、真的存檔再開一次比對。
+
+    uv run --project D:\\ws\\gt_labeling python scripts/verify_gui.py <gt_sample_root>
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from PyQt6.QtCore import QPoint, QSettings, Qt
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication
+
+from gt_labeling.model import load_frame
+from gt_labeling.window import MainWindow
+
+FAILURES: list[str] = []
+OUT_DIR = Path(__file__).resolve().parents[1] / "out"
+
+
+def check(condition: bool, message: str) -> None:
+    print(f"  {'ok  ' if condition else 'FAIL'} {message}")
+    if not condition:
+        FAILURES.append(message)
+
+
+def section(title: str) -> None:
+    print(f"\n=== {title} ===")
+
+
+def prepare_workdir(source: Path, tmp: Path) -> Path:
+    work = tmp / "gt_sample"
+    work.mkdir(parents=True)
+    shutil.copytree(source / "labels", work / "labels")
+    shutil.copytree(source / "frames", work / "frames")
+    return work
+
+
+def find_empty_spot(canvas, span: int = 60) -> QPoint | None:
+    """在影像範圍內找一個既不壓到框也不壓到控制點的起點,且往右下 span px 仍在影像內。"""
+    from PyQt6.QtCore import QPointF
+
+    image_rect = canvas.tf.image_rect()
+    for ratio_y in (0.15, 0.3, 0.05, 0.5, 0.7):
+        for ratio_x in (0.05, 0.15, 0.3, 0.45, 0.6):
+            x = image_rect.left() + image_rect.width() * ratio_x
+            y = image_rect.top() + image_rect.height() * ratio_y
+            if not image_rect.contains(x + span, y + span):
+                continue
+            corners = [QPointF(x, y), QPointF(x + span, y + span),
+                       QPointF(x + span, y), QPointF(x, y + span)]
+            if any(canvas._hit_box(p) is not None or canvas._hit_handle(p) is not None
+                   for p in corners):
+                continue
+            return QPoint(int(x), int(y))
+    return None
+
+
+def drag(canvas, start: QPoint, end: QPoint, steps: int = 6) -> None:
+    QTest.mousePress(canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    for i in range(1, steps + 1):
+        QTest.mouseMove(
+            canvas,
+            QPoint(
+                start.x() + round((end.x() - start.x()) * i / steps),
+                start.y() + round((end.y() - start.y()) * i / steps),
+            ),
+        )
+    QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+
+
+def main() -> int:
+    source = Path(sys.argv[1] if len(sys.argv) > 1 else r"D:\ws\detect_stream\out\gt_sample")
+    if not (source / "labels").is_dir():
+        print(f"找不到 {source}\\labels")
+        return 2
+
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="gt_gui_"))
+    try:
+        # QSettings 導到暫存目錄,不污染使用者真正的設定。
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp / "cfg"))
+
+        work = prepare_workdir(source, tmp)
+        app = QApplication(sys.argv[:1])
+        app.setOrganizationName("asys")
+        app.setApplicationName("gt_labeling_verify")
+
+        window = MainWindow(cache_size=8)
+        window.resize(1600, 900)
+        window.set_band(0.50, 0.90)
+        window.show()
+        app.processEvents()
+
+        section("開資料夾")
+        check(window.open_root(work), "open_root 成功")
+        check(len(window.frames) == 75, f"載入 75 幀(實際 {len(window.frames)})")
+        canvas = window.canvas
+        app.processEvents()
+        check(canvas.width() > 400 and canvas.height() > 300,
+              f"canvas 有實際尺寸 {canvas.width()}x{canvas.height()}")
+        check(canvas.frame is not None and canvas.frame.size == (3840, 1920),
+              "首幀尺寸 3840x1920")
+
+        section("逐幀瀏覽 75 幀")
+        t0 = time.perf_counter()
+        visited = 0
+        for _ in range(74):
+            window._navigate(1)
+            app.processEvents()
+            visited += 1
+        first_pass = time.perf_counter() - t0
+        check(window.index == 74, f"走到最後一幀(index={window.index})")
+        check(visited == 74, "74 次前進全部成功")
+        print(f"       首輪(含 JPEG 解碼)共 {first_pass * 1000:.0f} ms,"
+              f"平均 {first_pass / 74 * 1000:.1f} ms/幀")
+
+        # 快取命中路徑:在小範圍來回切,不應再解碼。
+        window._goto(40)
+        app.processEvents()
+        t0 = time.perf_counter()
+        for i in range(20):
+            window._goto(40 + (i % 3))
+            app.processEvents()
+        cached = (time.perf_counter() - t0) / 20
+        print(f"       快取命中切幀平均 {cached * 1000:.1f} ms/幀")
+        check(cached < 0.030, f"快取命中切幀 < 30ms(實際 {cached * 1000:.1f} ms)")
+
+        t0 = time.perf_counter()
+        for _ in range(30):
+            canvas.grab()
+        repaint = (time.perf_counter() - t0) / 30
+        print(f"       重繪平均 {repaint * 1000:.1f} ms(不重新解碼 JPEG)")
+        check(repaint < 0.050, f"重繪 < 50ms(實際 {repaint * 1000:.1f} ms)")
+
+        section("滑鼠拖曳:移動框")
+        target_index = next(i for i, f in enumerate(window.frames) if len(f.dets) >= 5)
+        window._goto(target_index)
+        app.processEvents()
+        frame = window.frames[target_index]
+
+        canvas.select(0)
+        det = frame.dets[0]
+        before_rect = canvas.tf.n2v_rect(det.bbox)
+        before_bbox = list(det.bbox)
+        start = before_rect.center().toPoint()
+        end = QPoint(start.x() + 24, start.y() + 16)
+        drag(canvas, start, end)
+        app.processEvents()
+
+        after_rect = canvas.tf.n2v_rect(det.bbox)
+        dx_px = after_rect.center().x() - before_rect.center().x()
+        dy_px = after_rect.center().y() - before_rect.center().y()
+        check(abs(dx_px - 24) < 1.5 and abs(dy_px - 16) < 1.5,
+              f"框中心移動 ({dx_px:.2f}, {dy_px:.2f}) px,目標 (24, 16)")
+        check(abs(after_rect.width() - before_rect.width()) < 0.6
+              and abs(after_rect.height() - before_rect.height()) < 0.6,
+              "移動不改變框尺寸(無變形)")
+        check(det.bbox != before_bbox and all(0.0 <= v <= 1.0 for v in det.bbox),
+              f"bbox 已更新且仍歸一化 {det.bbox}")
+        check(frame.dirty, "移動後標記未存")
+
+        section("滑鼠拖曳:控制點縮放")
+        det = frame.dets[0]
+        rect = canvas.tf.n2v_rect(det.bbox)
+        br = rect.bottomRight().toPoint()
+        left_before, top_before = rect.left(), rect.top()
+        drag(canvas, br, QPoint(br.x() + 30, br.y() + 20))
+        app.processEvents()
+        rect2 = canvas.tf.n2v_rect(det.bbox)
+        check(abs(rect2.right() - rect.right() - 30) < 1.5
+              and abs(rect2.bottom() - rect.bottom() - 20) < 1.5,
+              f"右下邊移動 ({rect2.right() - rect.right():.2f}, "
+              f"{rect2.bottom() - rect.bottom():.2f}) px,目標 (30, 20)")
+        check(abs(rect2.left() - left_before) < 0.6 and abs(rect2.top() - top_before) < 0.6,
+              "左上邊沒有跟著跑")
+
+        section("拖曳空白處新增框")
+        count_before = len(frame.dets)
+        empty = find_empty_spot(canvas)
+        check(empty is not None, f"找到影像內的空白起點 {empty}")
+        drag(canvas, empty, QPoint(empty.x() + 60, empty.y() + 40))
+        app.processEvents()
+        check(len(frame.dets) == count_before + 1, f"框數 {count_before} -> {len(frame.dets)}")
+        new_det = frame.dets[-1]
+        check(new_det.label == "person" and new_det.track_id is None and new_det.ppe is None,
+              f"新框預設 person / null / null(實際 {new_det.label} / "
+              f"{new_det.track_id} / {new_det.ppe})")
+        check(canvas.selected_index == len(frame.dets) - 1, "新框自動被選取")
+
+        section("面板編輯 + Delete")
+        window.det_panel.track_edit.setText("777")
+        window.det_panel.track_edit.editingFinished.emit()
+        app.processEvents()
+        check(frame.dets[-1].track_id == 777, f"track_id 寫入 777(實際 {frame.dets[-1].track_id})")
+
+        window.det_panel.label_box.setCurrentText("drone")
+        app.processEvents()
+        check(frame.dets[-1].label == "drone", "label 改成 drone")
+        check(not window.det_panel.ppe_box.isEnabled(), "drone 的 ppe 欄位被鎖住")
+
+        window.det_panel.label_box.setCurrentText("person")
+        window.det_panel.ppe_box.setCurrentIndex(window.det_panel.ppe_box.findData("ng"))
+        app.processEvents()
+        check(frame.dets[-1].ppe == "ng", f"ppe 寫入 ng(實際 {frame.dets[-1].ppe})")
+
+        count_before = len(frame.dets)
+        QTest.keyClick(canvas, Qt.Key.Key_Delete)
+        app.processEvents()
+        check(len(frame.dets) == count_before - 1, f"Delete 刪掉一框 -> {len(frame.dets)}")
+
+        section("復原/重做 25 步")
+        baseline = frame.dets_json()
+        canvas.select(0)
+        for i in range(25):
+            frame.dets[0].bbox = [
+                min(max(v + 0.0007 * (i + 1), 0.0), 1.0) for v in frame.dets[0].bbox
+            ]
+            canvas.detsEdited.emit()
+        app.processEvents()
+        after_edits = frame.dets_json()
+        check(after_edits != baseline, "25 次編輯確實改變了狀態")
+
+        for _ in range(25):
+            window._undo()
+        app.processEvents()
+        check(frame.dets_json() == baseline, "連續 25 次復原回到原狀")
+
+        for _ in range(25):
+            window._redo()
+        app.processEvents()
+        check(frame.dets_json() == after_edits, "連續 25 次重做回到編輯後狀態")
+
+        section("存檔 -> 從磁碟重開 -> 逐值比對")
+        in_memory = frame.dets_json()
+        label_path = frame.path
+        window._save_current()
+        app.processEvents()
+        check(not frame.dirty, "存檔後不再是未存")
+
+        reopened = load_frame(label_path)
+        check(reopened.dets_json() == in_memory, "重開後 dets 與存檔前逐值相同")
+        check(all(0.0 <= v <= 1.0 for d in reopened.dets_json() for v in d["bbox"]),
+              "重開後 bbox 仍是歸一化值")
+
+        # 重開整個資料集,確認畫面上的框位置(view rect)完全一致。
+        rects_before = [canvas.tf.n2v_rect(d.bbox) for d in frame.dets]
+        zoom_before, off_before = canvas.tf.zoom, (canvas.tf.off_x, canvas.tf.off_y)
+        check(window.open_root(work), "重新開啟同一個資料夾")
+        window._goto(target_index)
+        app.processEvents()
+        canvas.tf.zoom = zoom_before
+        canvas.tf.off_x, canvas.tf.off_y = off_before
+        reloaded_frame = window.frames[target_index]
+        rects_after = [canvas.tf.n2v_rect(d.bbox) for d in reloaded_frame.dets]
+        same = len(rects_before) == len(rects_after) and all(
+            abs(a.left() - b.left()) < 1e-9 and abs(a.top() - b.top()) < 1e-9
+            and abs(a.right() - b.right()) < 1e-9 and abs(a.bottom() - b.bottom()) < 1e-9
+            for a, b in zip(rects_before, rects_after)
+        )
+        check(same, "重開後每個框的畫面位置完全一致(零漂移)")
+
+        section("清單待補標記")
+        null_track_rows = [
+            i for i, f in enumerate(window.frames) if f.has_null_track
+        ]
+        check(bool(null_track_rows), f"有 {len(null_track_rows)} 幀含 track_id=null")
+        sample_row = window.list_panel.list.item(null_track_rows[0])
+        check("ID" in sample_row.text(), f"該列文字含 ID 標記:{sample_row.text()!r}")
+        clean_rows = [i for i, f in enumerate(window.frames)
+                      if not f.has_null_track and not f.has_null_ppe]
+        if clean_rows:
+            check("ID" not in window.list_panel.list.item(clean_rows[0]).text(),
+                  "沒有待補的列不帶 ID 標記")
+        print(f"       摘要:{window.list_panel.summary.text().replace(chr(10), ' | ')}")
+
+        section("輸出截圖")
+        OUT_DIR.mkdir(exist_ok=True)
+        window._goto(target_index)
+        canvas.fit_view()
+        app.processEvents()
+        shot = OUT_DIR / "verify_canvas.png"
+        check(canvas.grab().save(str(shot)), f"canvas 截圖 -> {shot}")
+        window_shot = OUT_DIR / "verify_window.png"
+        check(window.grab().save(str(window_shot)), f"視窗截圖 -> {window_shot}")
+
+        window.act_autosave.setChecked(False)
+        window.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print("\n" + "=" * 60)
+    if FAILURES:
+        print(f"失敗 {len(FAILURES)} 項:")
+        for item in FAILURES:
+            print(f"  - {item}")
+        return 1
+    print("全部通過")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

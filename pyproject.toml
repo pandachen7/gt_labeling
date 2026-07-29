@@ -1,0 +1,22 @@
+[project]
+name = "gt-labeling"
+version = "0.1.0"
+description = "GT 標註修正工具:檢視與修正物件偵測 ground truth"
+requires-python = ">=3.11"
+dependencies = [
+    "pyqt6>=6.7",
+]
+
+[project.scripts]
+gt-labeling = "gt_labeling.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gt_labeling"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
