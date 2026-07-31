@@ -5,6 +5,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIntValidator
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -118,6 +119,12 @@ class NewDetPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._buttons: dict[str, QRadioButton] = {}
+        self._follow_id: int | None = None
+
+        # 同一個 parent 下的 radio 預設全部互斥,label 與 track_id 是兩組獨立選擇,
+        # 必須各自 QButtonGroup,否則選 drone 會把 track_id 的選擇彈掉。
+        label_group = QButtonGroup(self)
+        track_group = QButtonGroup(self)
 
         box = QVBoxLayout()
         for label, caption in (("person", "person(ppe=ng)"), ("drone", "drone(紅框)")):
@@ -126,13 +133,21 @@ class NewDetPanel(QWidget):
                 lambda checked, name=label: checked and self.changed.emit(name)
             )
             self._buttons[label] = button
+            label_group.addButton(button)
             box.addWidget(button)
         self._buttons["person"].setChecked(True)
 
-        hint = QLabel("track_id 自動取本幀最大值 +1", self)
-        hint.setStyleSheet("color: #909090;")
-        hint.setWordWrap(True)
-        box.addWidget(hint)
+        caption = QLabel("track_id", self)
+        caption.setStyleSheet("color: #909090; margin-top: 6px;")
+        box.addWidget(caption)
+
+        self.auto_radio = QRadioButton("自動(本幀最大 +1)", self)
+        self.auto_radio.setChecked(True)
+        self.follow_radio = QRadioButton("沿用(先點一個框)", self)
+        self.follow_radio.setEnabled(False)
+        for button in (self.auto_radio, self.follow_radio):
+            track_group.addButton(button)
+            box.addWidget(button)
 
         group = QGroupBox("新框預設", self)
         group.setLayout(box)
@@ -155,6 +170,27 @@ class NewDetPanel(QWidget):
         """(label, ppe)。drone 沒有 ppe;person 直接判 ng(要修的幾乎都是 ng)。"""
         label = self.label()
         return label, ("ng" if label == "person" else None)
+
+    # ------------------------------------------------------------ track_id 沿用
+
+    def set_follow_candidate(self, track_id: int | None) -> None:
+        """記住剛點到的 track_id。
+
+        做成黏著值而非即時讀取選取框:canvas 在空白處按下時會先清掉選取才建新框,
+        那時已經問不到「剛剛選的是誰」。點過一次就一路沿用,也正好符合補錨點的
+        用法——連畫好幾幀都屬於同一條軌跡。
+        """
+        if track_id is None:
+            return
+        self._follow_id = track_id
+        self.follow_radio.setText(f"沿用 #{track_id}")
+        self.follow_radio.setEnabled(True)
+
+    def follow_id(self) -> int | None:
+        """選了沿用且有記住的號碼才回傳,否則 None 代表走自動取號。"""
+        if self.follow_radio.isChecked():
+            return self._follow_id
+        return None
 
 
 class DetPanel(QWidget):
@@ -261,7 +297,8 @@ class InterpolatePanel(QWidget):
 
         hint = QLabel(
             "選一個框後按「補框」,把同 track_id 的相鄰錨點之間補滿。\n"
-            "間距超過門檻的洞會跳過(目標可能被遮擋,不該憑空補)。",
+            "間距超過門檻的洞會跳過(目標可能被遮擋,不該憑空補)。\n"
+            "實測建議門檻:drone 20 幀、person 30 幀。",
             self,
         )
         hint.setStyleSheet("color: #909090;")

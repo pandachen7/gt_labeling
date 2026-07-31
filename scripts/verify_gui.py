@@ -237,6 +237,43 @@ def main() -> int:
               f"第二個新框續號 {expected_id + 1}(實際 {new_det.track_id})")
         check(not new_det.pending, "person 新框不再是待補")
 
+        section("新框預設:沿用選取框的 track_id")
+        check(window.new_panel.follow_id() is None, "沒選「沿用」時 follow_id() 回 None")
+
+        anchor_pos = next(k for k, d in enumerate(frame.dets) if d.track_id is not None)
+        canvas.select(anchor_pos)
+        app.processEvents()
+        anchor_id = frame.dets[anchor_pos].track_id
+        check(window.new_panel.follow_radio.isEnabled(),
+              f"點過框後「沿用」可選,候選 = #{anchor_id}")
+        check(f"#{anchor_id}" in window.new_panel.follow_radio.text(),
+              f"radio 顯示候選號碼:{window.new_panel.follow_radio.text()!r}")
+
+        # 兩組 radio 必須互不干擾:切 label 不能把 track_id 的選擇彈掉。
+        window.new_panel.follow_radio.setChecked(True)
+        window.new_panel.set_label("drone")
+        app.processEvents()
+        check(window.new_panel.follow_radio.isChecked() and window.new_panel.label() == "drone",
+              "切換 label 不會把「沿用」彈掉(QButtonGroup 分組正確)")
+        check(window.new_panel.follow_id() == anchor_id,
+              f"follow_id() = {window.new_panel.follow_id()}(預期 {anchor_id})")
+
+        count_before = len(frame.dets)
+        empty = find_empty_spot(canvas)
+        check(empty is not None, f"找到第三個空白起點 {empty}")
+        drag(canvas, empty, QPoint(empty.x() + 60, empty.y() + 40))
+        app.processEvents()
+        check(len(frame.dets) == count_before + 1, f"框數 {count_before} -> {len(frame.dets)}")
+        check(frame.dets[-1].track_id == anchor_id,
+              f"新框沿用 #{anchor_id}(實際 {frame.dets[-1].track_id}),而非本幀最大 +1")
+
+        window.new_panel.auto_radio.setChecked(True)
+        window.new_panel.set_label("person")
+        app.processEvents()
+        check(window.new_panel.follow_id() is None, "切回自動後不再沿用")
+        canvas.delete_selected()
+        app.processEvents()
+
         section("面板編輯 + Delete")
         window.det_panel.track_edit.setText("777")
         window.det_panel.track_edit.editingFinished.emit()

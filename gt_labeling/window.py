@@ -39,6 +39,7 @@ HELP_TEXT = """\
 A / ← 上一張    D / → 下一張
 滑鼠滾輪 縮放     中鍵 / 右鍵 / Space+左鍵 平移
 左鍵拖空白 新增框(套用右上「新框預設」)
+  補錨點前先點該 track 任一框,再選「沿用 #id」
 左鍵點框 選取,拖角邊改大小,拖框內移動
 Delete 刪除選取框    F 還原檢視
 Ctrl+S 存檔   Ctrl+Z 復原   Ctrl+Shift+Z 重做
@@ -445,12 +446,16 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------------- 新框預設
 
     def _next_track_id(self) -> int:
-        """當前幀最大 track_id + 1。
+        """新框要掛的 track_id。
 
-        用途是補該幀漏標的框,所以號碼接在**這一幀**已有的最後一個之後。取 max 而非
-        dets 陣列最後一顆:tracker 輸出的順序不保證按 id 遞增(實測有 [4,2,1,3,5]),
-        取最後一顆遇到亂序就會發出已被佔用的號。
+        選了「沿用」就直接用記住的號碼(補錨點時連畫好幾幀都屬於同一條軌跡);
+        否則取當前幀最大 +1——用途是補該幀漏標的框,號碼接在**這一幀**已有的
+        最後一個之後。取 max 而非 dets 陣列最後一顆:tracker 輸出的順序不保證
+        按 id 遞增(實測有 [4,2,1,3,5]),取最後一顆遇到亂序就會發出已佔用的號。
         """
+        follow = self.new_panel.follow_id()
+        if follow is not None:
+            return follow
         if not (0 <= self.index < len(self.frames)):
             return 0
         used = [d.track_id for d in self.frames[self.index].dets if d.track_id is not None]
@@ -572,9 +577,10 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, index: int) -> None:
         frame = self.frames[self.index] if 0 <= self.index < len(self.frames) else None
-        self.det_panel.set_det(
-            self.canvas.selected_det, frame.size if frame is not None else None
-        )
+        selected = self.canvas.selected_det
+        self.det_panel.set_det(selected, frame.size if frame is not None else None)
+        if selected is not None:
+            self.new_panel.set_follow_candidate(selected.track_id)
         # 走統一刷新而非單獨設某個 action:選取狀態會影響不只一個動作,
         # 逐一手動更新遲早漏掉(「補框」就是這樣一直停在停用狀態)。
         self._refresh_actions()
