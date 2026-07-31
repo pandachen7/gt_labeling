@@ -18,6 +18,7 @@ from PyQt6.QtCore import QPoint, QSettings, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
+from gt_labeling.canvas import COLOR_DRONE, det_color
 from gt_labeling.model import load_frame
 from gt_labeling.window import MainWindow
 
@@ -184,18 +185,46 @@ def main() -> int:
         check(abs(rect2.left() - left_before) < 0.6 and abs(rect2.top() - top_before) < 0.6,
               "左上邊沒有跟著跑")
 
-        section("拖曳空白處新增框")
+        section("新框預設選擇器:drone")
         count_before = len(frame.dets)
+        expected_id = max(
+            (d.track_id for d in frame.dets if d.track_id is not None), default=-1
+        ) + 1
+        window.new_panel.set_label("drone")
+        app.processEvents()
+        check(window.new_panel.defaults() == ("drone", None),
+              f"選擇器回報 drone 預設 {window.new_panel.defaults()}")
         empty = find_empty_spot(canvas)
         check(empty is not None, f"找到影像內的空白起點 {empty}")
         drag(canvas, empty, QPoint(empty.x() + 60, empty.y() + 40))
         app.processEvents()
         check(len(frame.dets) == count_before + 1, f"框數 {count_before} -> {len(frame.dets)}")
         new_det = frame.dets[-1]
-        check(new_det.label == "person" and new_det.track_id is None and new_det.ppe is None,
-              f"新框預設 person / null / null(實際 {new_det.label} / "
-              f"{new_det.track_id} / {new_det.ppe})")
+        check(new_det.label == "drone" and new_det.ppe is None,
+              f"新框是 drone / ppe=null(實際 {new_det.label} / {new_det.ppe})")
+        check(new_det.track_id == expected_id,
+              f"track_id = 本幀最大 +1 = {expected_id}(實際 {new_det.track_id})")
+        check(det_color(new_det) == COLOR_DRONE, "drone 框畫成紅色")
+        check(not new_det.pending, "drone 新框不再是待補")
         check(canvas.selected_index == len(frame.dets) - 1, "新框自動被選取")
+
+        section("新框預設選擇器:person")
+        count_before = len(frame.dets)
+        window.new_panel.set_label("person")
+        app.processEvents()
+        check(window.new_panel.defaults() == ("person", "ng"),
+              f"選擇器回報 person 預設 {window.new_panel.defaults()}")
+        empty = find_empty_spot(canvas)
+        check(empty is not None, f"找到第二個空白起點 {empty}")
+        drag(canvas, empty, QPoint(empty.x() + 60, empty.y() + 40))
+        app.processEvents()
+        check(len(frame.dets) == count_before + 1, f"框數 {count_before} -> {len(frame.dets)}")
+        new_det = frame.dets[-1]
+        check(new_det.label == "person" and new_det.ppe == "ng",
+              f"新框是 person / ppe=ng(實際 {new_det.label} / {new_det.ppe})")
+        check(new_det.track_id == expected_id + 1,
+              f"第二個新框續號 {expected_id + 1}(實際 {new_det.track_id})")
+        check(not new_det.pending, "person 新框不再是待補")
 
         section("面板編輯 + Delete")
         window.det_panel.track_edit.setText("777")
@@ -270,17 +299,31 @@ def main() -> int:
         check(same, "重開後每個框的畫面位置完全一致(零漂移)")
 
         section("清單待補標記")
-        null_track_rows = [
-            i for i, f in enumerate(window.frames) if f.has_null_track
-        ]
-        check(bool(null_track_rows), f"有 {len(null_track_rows)} 幀含 track_id=null")
-        sample_row = window.list_panel.list.item(null_track_rows[0])
-        check("ID" in sample_row.text(), f"該列文字含 ID 標記:{sample_row.text()!r}")
-        clean_rows = [i for i, f in enumerate(window.frames)
-                      if not f.has_null_track and not f.has_null_ppe]
-        if clean_rows:
-            check("ID" not in window.list_panel.list.item(clean_rows[0]).text(),
+        # 樣本資料不保證含 null,自己在記憶體造一個待補狀態再還原,驗證與資料內容無關。
+        probe_row = next(
+            (i for i, f in enumerate(window.frames)
+             if f.dets and not f.has_null_track and not f.has_null_ppe),
+            None,
+        )
+        check(probe_row is not None, "找到一幀沒有待補的列當基準")
+        if probe_row is not None:
+            probe_frame = window.frames[probe_row]
+            check("ID" not in window.list_panel.list.item(probe_row).text(),
                   "沒有待補的列不帶 ID 標記")
+
+            original_id = probe_frame.dets[0].track_id
+            probe_frame.dets[0].track_id = None
+            window.list_panel.refresh_row(probe_row, probe_frame)
+            check(probe_frame.has_null_track, "把 track_id 設成 null 後該幀標記為待補")
+            check("ID" in window.list_panel.list.item(probe_row).text(),
+                  f"該列文字含 ID 標記:{window.list_panel.list.item(probe_row).text()!r}")
+
+            probe_frame.dets[0].track_id = original_id
+            window.list_panel.refresh_row(probe_row, probe_frame)
+            check(not probe_frame.dirty and "ID" not in
+                  window.list_panel.list.item(probe_row).text(),
+                  "還原 track_id 後標記消失且不算未存")
+        window.list_panel.refresh_summary(window.frames)
         print(f"       摘要:{window.list_panel.summary.text().replace(chr(10), ' | ')}")
 
         section("輸出截圖")

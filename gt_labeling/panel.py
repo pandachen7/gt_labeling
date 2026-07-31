@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -101,6 +102,57 @@ class FrameListPanel(QWidget):
     def _on_row_changed(self, row: int) -> None:
         if not self._syncing and row >= 0:
             self.rowSelected.emit(row)
+
+
+class NewDetPanel(QWidget):
+    """畫新框時要套用的預設屬性。
+
+    只影響「接下來畫的框」,不動已存在的框(那是 DetPanel 的事)。放 radio 而非
+    下拉:標註時最常做的動作就是在 person/drone 之間切換,一次點擊就到位。
+    """
+
+    changed = pyqtSignal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._buttons: dict[str, QRadioButton] = {}
+
+        box = QVBoxLayout()
+        for label, caption in (("person", "person(ppe=ng)"), ("drone", "drone(紅框)")):
+            button = QRadioButton(caption, self)
+            button.toggled.connect(
+                lambda checked, name=label: checked and self.changed.emit(name)
+            )
+            self._buttons[label] = button
+            box.addWidget(button)
+        self._buttons["person"].setChecked(True)
+
+        hint = QLabel("track_id 自動取本幀最大值 +1", self)
+        hint.setStyleSheet("color: #909090;")
+        hint.setWordWrap(True)
+        box.addWidget(hint)
+
+        group = QGroupBox("新框預設", self)
+        group.setLayout(box)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(group)
+
+    def label(self) -> str:
+        return next(
+            (name for name, button in self._buttons.items() if button.isChecked()), LABELS[0]
+        )
+
+    def set_label(self, label: str) -> None:
+        button = self._buttons.get(label)
+        if button is not None:
+            button.setChecked(True)
+
+    def defaults(self) -> tuple[str, str | None]:
+        """(label, ppe)。drone 沒有 ppe;person 直接判 ng(要修的幾乎都是 ng)。"""
+        label = self.label()
+        return label, ("ng" if label == "person" else None)
 
 
 class DetPanel(QWidget):

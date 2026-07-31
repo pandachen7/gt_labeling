@@ -20,8 +20,8 @@ from PyQt6.QtWidgets import (
 
 from .canvas import ImageCanvas
 from .dataset import FrameEntry, ImageStore, load_all, scan_root
-from .model import FrameLabel, UndoStack, load_frame
-from .panel import BandPanel, DetPanel, FrameListPanel
+from .model import Det, FrameLabel, UndoStack, load_frame
+from .panel import BandPanel, DetPanel, FrameListPanel, NewDetPanel
 
 UNDO_LIMIT = 60
 PREFETCH_RADIUS = 2
@@ -31,7 +31,7 @@ DEFAULT_HEIGHT = 940
 HELP_TEXT = """\
 A / ← 上一張    D / → 下一張
 滑鼠滾輪 縮放     中鍵 / 右鍵 / Space+左鍵 平移
-左鍵拖空白 新增框(person / null / null)
+左鍵拖空白 新增框(套用右上「新框預設」)
 左鍵點框 選取,拖角邊改大小,拖框內移動
 Delete 刪除選取框    F 還原檢視
 Ctrl+S 存檔   Ctrl+Z 復原   Ctrl+Shift+Z 重做"""
@@ -62,7 +62,9 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.canvas = ImageCanvas(self)
+        self.canvas.new_det_factory = self._make_new_det
         self.list_panel = FrameListPanel(self)
+        self.new_panel = NewDetPanel(self)
         self.det_panel = DetPanel(self)
         self.band_panel = BandPanel(self)
 
@@ -72,6 +74,7 @@ class MainWindow(QMainWindow):
         right = QWidget(self)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(self.new_panel)
         right_layout.addWidget(self.det_panel)
         right_layout.addWidget(self.band_panel)
         right_layout.addStretch(1)
@@ -103,6 +106,7 @@ class MainWindow(QMainWindow):
         self.canvas.navigateRequested.connect(self._navigate)
         self.canvas.hoverMoved.connect(self._on_hover)
         self.list_panel.rowSelected.connect(self._goto)
+        self.new_panel.changed.connect(self._on_new_default_changed)
         self.det_panel.fieldChanged.connect(self._on_field_changed)
         self.band_panel.bandChanged.connect(self._on_band_changed)
 
@@ -170,6 +174,7 @@ class MainWindow(QMainWindow):
         self.settings.remove("geometry")  # 舊版存過含位置的 geometry,清掉
         self._restore_size()
         self.act_autosave.setChecked(self.settings.value("autosave", True, type=bool))
+        self.new_panel.set_label(str(self.settings.value("new_label", "person")))
         self.band_panel.set_band(
             self.settings.value("band_lo", 0.0, type=float),
             self.settings.value("band_hi", 1.0, type=float),
@@ -224,6 +229,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("win_w", self.width())
         self.settings.setValue("win_h", self.height())
         self.settings.setValue("autosave", self.act_autosave.isChecked())
+        self.settings.setValue("new_label", self.new_panel.label())
         self.settings.setValue("band_lo", self.band_panel.lo_spin.value())
         self.settings.setValue("band_hi", self.band_panel.hi_spin.value())
         self.settings.setValue("band_on", self.band_panel.enabled_box.isChecked())
@@ -404,6 +410,29 @@ class MainWindow(QMainWindow):
             return
         self._save_settings()
         super().closeEvent(event)
+
+    # ----------------------------------------------------------------- 新框預設
+
+    def _next_track_id(self) -> int:
+        """當前幀最大 track_id + 1。
+
+        用途是補該幀漏標的框,所以號碼接在**這一幀**已有的最後一個之後。取 max 而非
+        dets 陣列最後一顆:tracker 輸出的順序不保證按 id 遞增(實測有 [4,2,1,3,5]),
+        取最後一顆遇到亂序就會發出已被佔用的號。
+        """
+        if not (0 <= self.index < len(self.frames)):
+            return 0
+        used = [d.track_id for d in self.frames[self.index].dets if d.track_id is not None]
+        return max(used) + 1 if used else 0
+
+    def _make_new_det(self) -> Det:
+        label, ppe = self.new_panel.defaults()
+        return Det(label=label, track_id=self._next_track_id(), ppe=ppe)
+
+    def _on_new_default_changed(self, label: str) -> None:
+        self.statusBar().showMessage(f"新框預設:{label}", 2000)
+        # 焦點還給畫布,切完模式可以直接畫、也不吃掉 A/D 之類的快捷鍵。
+        self.canvas.setFocus()
 
     # ------------------------------------------------------------- 編輯與 undo
 

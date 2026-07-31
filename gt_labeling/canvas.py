@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum, auto
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
@@ -100,6 +101,9 @@ class ImageCanvas(QWidget):
         self.setMinimumSize(320, 240)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
+        # 新框的預設屬性由外部決定(右側「新框預設」+ 全域取號),canvas 只負責畫。
+        self.new_det_factory: Callable[[], Det] = Det
+
         self.tf = ViewTransform()
         self._frame: FrameLabel | None = None
         self._pixmap: QPixmap | None = None
@@ -112,7 +116,7 @@ class ImageCanvas(QWidget):
         self._handle = 0
         self._drag_n0 = QPointF()
         self._orig_bbox: list[float] = []
-        self._new_bbox: list[float] | None = None
+        self._new_det: Det | None = None
         self._pan_last = QPointF()
         self._space_held = False
 
@@ -149,7 +153,7 @@ class ImageCanvas(QWidget):
         self._scaled = None
         self._scaled_key = None
         self._mode = Mode.IDLE
-        self._new_bbox = None
+        self._new_det = None
 
         if frame is not None:
             width, height = frame.size
@@ -364,7 +368,10 @@ class ImageCanvas(QWidget):
 
         self._set_selection(-1)
         start = _clamp01(self.tf.v2n_point(pos))
-        self._new_bbox = [start.x(), start.y(), start.x(), start.y()]
+        # 起手就決定屬性,拖曳中的虛線框才能顯示最終顏色(drone = 紅)。
+        det = self.new_det_factory()
+        det.bbox = [start.x(), start.y(), start.x(), start.y()]
+        self._new_det = det
         self._mode = Mode.NEW
         self.update()
 
@@ -385,10 +392,10 @@ class ImageCanvas(QWidget):
             self._apply_move(pos)
         elif self._mode is Mode.RESIZE:
             self._apply_resize(pos)
-        elif self._mode is Mode.NEW and self._new_bbox is not None:
+        elif self._mode is Mode.NEW and self._new_det is not None:
             end = _clamp01(n)
-            self._new_bbox[2] = end.x()
-            self._new_bbox[3] = end.y()
+            self._new_det.bbox[2] = end.x()
+            self._new_det.bbox[3] = end.y()
             self.update()
         else:
             self._update_cursor(pos)
@@ -402,11 +409,12 @@ class ImageCanvas(QWidget):
             return
 
         if mode is Mode.NEW:
-            pending, self._new_bbox = self._new_bbox, None
+            pending, self._new_det = self._new_det, None
             if pending is not None and self._frame is not None:
-                rect = self.tf.n2v_rect(pending)
+                rect = self.tf.n2v_rect(pending.bbox)
                 if rect.width() >= NEW_MIN_PX and rect.height() >= NEW_MIN_PX:
-                    self._frame.dets.append(Det(bbox=canonical_bbox(pending)))
+                    pending.bbox = canonical_bbox(pending.bbox)
+                    self._frame.dets.append(pending)
                     self._set_selection(len(self._frame.dets) - 1)
                     self.detsEdited.emit()
             self.update()
@@ -441,7 +449,7 @@ class ImageCanvas(QWidget):
             return
         if key == Qt.Key.Key_Escape:
             if self._mode is Mode.NEW:
-                self._new_bbox = None
+                self._new_det = None
             self._mode = Mode.IDLE
             self._set_selection(-1)
             self.update()
@@ -580,8 +588,8 @@ class ImageCanvas(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def _draw_new_box(self, painter: QPainter) -> None:
-        if self._new_bbox is None:
+        if self._new_det is None:
             return
-        painter.setPen(QPen(COLOR_SELECT, 1, Qt.PenStyle.DashLine))
+        painter.setPen(QPen(det_color(self._new_det), 2, Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(self.tf.n2v_rect(self._new_bbox))
+        painter.drawRect(self.tf.n2v_rect(self._new_det.bbox))
