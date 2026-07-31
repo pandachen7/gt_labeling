@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QRadioButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
 from .model import LABELS, FrameLabel
 
 PPE_ITEMS: tuple[tuple[str, str | None], ...] = (("未定", None), ("ok", "ok"), ("ng", "ng"))
+DEFAULT_MAX_GAP = 20
 COLOR_PENDING = QColor("#ffb340")
 COLOR_NORMAL = QColor("#dcdcdc")
 
@@ -239,6 +241,62 @@ class DetPanel(QWidget):
     def _emit_track(self) -> None:
         text = self.track_edit.text().strip()
         self._emit("track_id", int(text) if text else None)
+
+
+class InterpolatePanel(QWidget):
+    """補框設定:是否啟用、錨點最大間距。"""
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.enabled_box = QCheckBox("啟用內插補框", self)
+        self.enabled_box.toggled.connect(self._on_toggled)
+
+        self.gap_spin = QSpinBox(self)
+        self.gap_spin.setRange(2, 300)
+        self.gap_spin.setValue(DEFAULT_MAX_GAP)
+        self.gap_spin.setSuffix(" 幀")
+
+        hint = QLabel(
+            "選一個框後按「補框」,把同 track_id 的相鄰錨點之間補滿。\n"
+            "間距超過門檻的洞會跳過(目標可能被遮擋,不該憑空補)。",
+            self,
+        )
+        hint.setStyleSheet("color: #909090;")
+        hint.setWordWrap(True)
+
+        form = QFormLayout()
+        form.addRow(self.enabled_box)
+        form.addRow("錨點最大間距", self.gap_spin)
+        form.addRow(hint)
+
+        group = QGroupBox("內插補框", self)
+        group.setLayout(form)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(group)
+        self._sync_enabled()
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._sync_enabled()
+        self.toggled.emit(checked)
+
+    def _sync_enabled(self) -> None:
+        self.gap_spin.setEnabled(self.enabled_box.isChecked())
+
+    def is_enabled(self) -> bool:
+        return self.enabled_box.isChecked()
+
+    def max_gap(self) -> int:
+        return self.gap_spin.value()
+
+    def set_state(self, enabled: bool, max_gap: int) -> None:
+        self.gap_spin.setValue(max_gap)
+        self.enabled_box.setChecked(enabled)
+        self._sync_enabled()
 
 
 class BandPanel(QWidget):

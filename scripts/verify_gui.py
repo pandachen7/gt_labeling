@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import collections
 import os
 import shutil
 import sys
@@ -19,11 +20,21 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from gt_labeling.canvas import COLOR_DRONE, det_color
-from gt_labeling.model import load_frame
+from gt_labeling.model import canonical_bbox, interpolate_missing, load_frame
 from gt_labeling.window import MainWindow
 
 FAILURES: list[str] = []
 OUT_DIR = Path(__file__).resolve().parents[1] / "out"
+
+
+def box_iou(a, b) -> float:
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    inter = (x2 - x1) * (y2 - y1)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union
 
 
 def check(condition: bool, message: str) -> None:
@@ -298,6 +309,98 @@ def main() -> int:
         )
         check(same, "重開後每個框的畫面位置完全一致(零漂移)")
 
+        section("內插補框")
+        # 挖一個真的洞:找一個橫跨多幀的 track,把中間幾幀的框拿掉,再補回來比對。
+        counts = collections.Counter(
+            d.track_id for f in window.frames for d in f.dets if d.track_id is not None
+        )
+        probe_tid = next((t for t, c in counts.most_common() if c >= 6), None)
+        check(probe_tid is not None, f"找到橫跨多幀的 track(id={probe_tid})")
+
+        rows = [i for i, f in enumerate(window.frames)
+                if any(d.track_id == probe_tid for d in f.dets)]
+        hole = rows[1:4]
+        truth, origin = {}, {}
+        for i in hole:
+            frame_i = window.frames[i]
+            pos = next(k for k, d in enumerate(frame_i.dets) if d.track_id == probe_tid)
+            truth[i] = list(frame_i.dets[pos].bbox)
+            origin[i] = (pos, frame_i.dets[pos])
+            del frame_i.dets[pos]
+        check(all(not any(d.track_id == probe_tid for d in window.frames[i].dets)
+                  for i in hole), f"挖掉 {len(hole)} 幀的 track {probe_tid}")
+
+        window.interp_panel.set_state(True, 2)
+        window._goto(rows[0])
+        window.canvas.select(
+            next(k for k, d in enumerate(window.frames[rows[0]].dets)
+                 if d.track_id == probe_tid)
+        )
+        app.processEvents()
+        check(window.act_interp.isEnabled(), "有資料時「補框」動作可觸發(不靜默失敗)")
+        gap_seq = window.frames[rows[4]].seq - window.frames[rows[0]].seq
+        tight = interpolate_missing(window.frames, probe_tid, 2)
+        check(not tight.additions and tight.skipped,
+              f"門檻 2 幀時整個洞被跳過(實際 seq 間距 {gap_seq},skipped={len(tight.skipped)})")
+
+        window.interp_panel.set_state(True, 100000)
+        app.processEvents()
+        loose = interpolate_missing(window.frames, probe_tid, 100000)
+        check(len(loose.additions) >= len(hole),
+              f"放寬門檻後算出 {len(loose.additions)} 個要補的框(挖掉的有 {len(hole)} 個)")
+        window.apply_interpolation(loose)
+        app.processEvents()
+        filled = {}
+        for i in hole:
+            got = next((d for d in window.frames[i].dets if d.track_id == probe_tid), None)
+            if got is not None:
+                filled[i] = got
+        check(len(filled) == len(hole), f"套用後補回 {len(filled)}/{len(hole)} 幀")
+
+        if len(filled) == len(hole):
+            # 驗的是內插的數學正確性,不是與真實框的 IoU:gt_sample 是 5 秒抽樣,
+            # 人走 5 秒後框本來就不重疊,那是資料特性,不是程式對錯。
+            a_i, b_i = rows[0], rows[4]
+            a = next(d for d in window.frames[a_i].dets if d.track_id == probe_tid)
+            b = next(d for d in window.frames[b_i].dets if d.track_id == probe_tid)
+            sa, sb = window.frames[a_i].seq, window.frames[b_i].seq
+            exact = True
+            for i in hole:
+                t = (window.frames[i].seq - sa) / (sb - sa)
+                want = canonical_bbox(
+                    [a.bbox[m] + (b.bbox[m] - a.bbox[m]) * t for m in range(4)]
+                )
+                exact = exact and filled[i].bbox == want
+            check(exact, f"補回的 bbox 等於兩錨點(seq {sa}/{sb})的線性內插值")
+
+            src = next(d for d in window.frames[rows[0]].dets if d.track_id == probe_tid)
+            check(all(f.label == src.label and f.ppe == src.ppe for f in filled.values()),
+                  f"補回的框沿用錨點屬性({src.label} / {src.ppe})")
+            ious = [box_iou(filled[i].bbox, truth[i]) for i in hole]
+            print(f"       參考:與真實框 IoU 中位 {sorted(ious)[len(ious) // 2]:.3f}"
+                  f"(5 秒抽樣資料本來就低,逐幀資料才有意義)")
+
+        window._undo_interpolation()
+        app.processEvents()
+        check(all(not any(d.track_id == probe_tid for d in window.frames[i].dets)
+                  for i in hole), "Ctrl+Shift+I 整組復原,補的框全部消失")
+
+        # 放回原位(不是 append),否則 dets 順序改變會讓該幀永遠是未存狀態。
+        for i in hole:
+            pos, det_i = origin[i]
+            window.frames[i].dets.insert(pos, det_i)
+        check(not any(window.frames[i].dirty for i in hole), "還原後這幾幀回到已存狀態")
+
+        window.interp_panel.set_state(False, 20)
+        app.processEvents()
+        before_counts = [len(f.dets) for f in window.frames]
+        window._interpolate()  # 未啟用時應直接說明並返回,不彈對話框、不動資料
+        app.processEvents()
+        check([len(f.dets) for f in window.frames] == before_counts,
+              "取消勾選後按補框不會改動任何資料")
+        check("勾選" in window.statusBar().currentMessage(),
+              f"且有說明原因:{window.statusBar().currentMessage()!r}")
+
         section("清單待補標記")
         # 樣本資料不保證含 null,自己在記憶體造一個待補狀態再還原,驗證與資料內容無關。
         probe_row = next(
@@ -336,6 +439,10 @@ def main() -> int:
         window_shot = OUT_DIR / "verify_window.png"
         check(window.grab().save(str(window_shot)), f"視窗截圖 -> {window_shot}")
 
+        # 關 autosave 後若還有未存幀,closeEvent 會彈確認框把 offscreen 測試卡死。
+        for i, f in enumerate(window.frames):
+            if f.dirty:
+                window._reload_frame(i)
         window.act_autosave.setChecked(False)
         window.close()
     finally:
