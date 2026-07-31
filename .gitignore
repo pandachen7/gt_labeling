@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# Linter / Formatter cache
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime output（運行時自動產出，整個目錄忽略）
+/data/
+*.log
+*.db
+*.db-journal
+
+# Assets — ONNX 模型檔案（太大不進 git，僅追蹤 metadata.yaml）
+/assets/model_library/**/*.onnx
+
+# Assets — 前端建置產出（由前端專案建置後放入，僅保留 .gitkeep 佔位）
+/assets/static_web/*
+!/assets/static_web/.gitkeep
+
+# Certificates (預設自簽憑證隨 repo，動態產生的憑證由部署管理)
+
+# Environment
+.env
+.env.*
+
+# PyInstaller (保留 .spec 設定檔，僅忽略產出)
+# dist/ 和 build/ 已在上方忽略
+
+# trt model(.engine) 在不同硬體架構下無法共用, 建議不要git
+*.engine
+
+Linux_Python_master_2026-03-19/
+tmp/
+*.etlt
+*.pth
+*.pt
+**/*.zip
+
+# git worktree(本機隔離開發用)
+.worktrees/
+worktrees/
+
+# codegraph 索引快取(二進位 db,工具產生,不入版控)
+.codegraph/
+data/
+trt/
+out/
+vendor/
+config/*.png
+*.mp4
+*.mkv
