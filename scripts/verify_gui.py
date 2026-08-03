@@ -349,40 +349,44 @@ def main() -> int:
         section("內插補框")
         # 挖一個真的洞:找一個橫跨多幀的 track,把中間幾幀的框拿掉,再補回來比對。
         counts = collections.Counter(
-            d.track_id for f in window.frames for d in f.dets if d.track_id is not None
+            # 軌跡身分是 (label, track_id),不是單獨的 track_id
+            (d.label, d.track_id)
+            for f in window.frames for d in f.dets if d.track_id is not None
         )
-        probe_tid = next((t for t, c in counts.most_common() if c >= 6), None)
-        check(probe_tid is not None, f"找到橫跨多幀的 track(id={probe_tid})")
+        probe = next((k for k, c in counts.most_common() if c >= 6), None)
+        check(probe is not None, f"找到橫跨多幀的 track{probe}")
+        probe_label, probe_tid = probe
 
-        rows = [i for i, f in enumerate(window.frames)
-                if any(d.track_id == probe_tid for d in f.dets)]
+        def on_track(det) -> bool:
+            return det.track_id == probe_tid and det.label == probe_label
+
+        rows = [i for i, f in enumerate(window.frames) if any(on_track(d) for d in f.dets)]
         hole = rows[1:4]
         truth, origin = {}, {}
         for i in hole:
             frame_i = window.frames[i]
-            pos = next(k for k, d in enumerate(frame_i.dets) if d.track_id == probe_tid)
+            pos = next(k for k, d in enumerate(frame_i.dets) if on_track(d))
             truth[i] = list(frame_i.dets[pos].bbox)
             origin[i] = (pos, frame_i.dets[pos])
             del frame_i.dets[pos]
-        check(all(not any(d.track_id == probe_tid for d in window.frames[i].dets)
-                  for i in hole), f"挖掉 {len(hole)} 幀的 track {probe_tid}")
+        check(all(not any(on_track(d) for d in window.frames[i].dets) for i in hole),
+              f"挖掉 {len(hole)} 幀的 {probe_label}#{probe_tid}")
 
         window.interp_panel.set_state(True, 2)
         window._goto(rows[0])
         window.canvas.select(
-            next(k for k, d in enumerate(window.frames[rows[0]].dets)
-                 if d.track_id == probe_tid)
+            next(k for k, d in enumerate(window.frames[rows[0]].dets) if on_track(d))
         )
         app.processEvents()
         check(window.act_interp.isEnabled(), "有資料時「補框」動作可觸發(不靜默失敗)")
         gap_seq = window.frames[rows[4]].seq - window.frames[rows[0]].seq
-        tight = interpolate_missing(window.frames, probe_tid, 2)
+        tight = interpolate_missing(window.frames, probe_label, probe_tid, 2)
         check(not tight.additions and tight.skipped,
               f"門檻 2 幀時整個洞被跳過(實際 seq 間距 {gap_seq},skipped={len(tight.skipped)})")
 
         window.interp_panel.set_state(True, 100000)
         app.processEvents()
-        loose = interpolate_missing(window.frames, probe_tid, 100000)
+        loose = interpolate_missing(window.frames, probe_label, probe_tid, 100000)
         check(len(loose.additions) >= len(hole),
               f"放寬門檻後算出 {len(loose.additions)} 個要補的框(挖掉的有 {len(hole)} 個)")
         window.apply_interpolation(loose)

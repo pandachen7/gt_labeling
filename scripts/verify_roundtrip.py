@@ -16,7 +16,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PyQt6.QtCore import QPointF, QSize
 
 from gt_labeling.dataset import scan_root
-from gt_labeling.model import Det, canonical_bbox, load_frame
+from gt_labeling.model import (
+    Det,
+    FrameLabel,
+    TextStyle,
+    canonical_bbox,
+    interpolate_missing,
+    load_frame,
+)
 from gt_labeling.transform import ViewTransform
 
 FAILURES: list[str] = []
@@ -183,6 +190,68 @@ def test_edit_roundtrip(root: Path) -> None:
     check(stable, "連續 5 輪存/開位元組不再變動")
 
 
+def test_interpolate_is_per_label() -> None:
+    """track_id 是 per-label 的:person#1 與 drone#1 是兩條不同的軌跡。
+
+    eval_gt.py 讀 GT 時就把 person / drone 拆成兩個清單各自評估(MOT 還加
+    id_prefix 區分),gt_densify.py 的 --drone-id 也只保證「同一架 drone 統一
+    成一個號」,不保證跟 person 不撞。補框若只認 track_id 就會把兩條軌跡混成
+    一條——而且兩種失敗都是靜默的。
+    """
+    section("補框:person#1 與 drone#1 不得互相干擾")
+
+    def frame_of(seq: int, dets: list[Det]) -> FrameLabel:
+        raw = {"type": "gt", "version": 1, "seq": seq, "size": [3840, 1920], "dets": []}
+        return FrameLabel(path=Path(f"{seq:06d}.json"), raw=raw, dets=dets,
+                          style=TextStyle())
+
+    def person(bbox: list[float]) -> Det:
+        return Det(label="person", track_id=1, ppe="ng", bbox=bbox)
+
+    def drone(bbox: list[float]) -> Det:
+        return Det(label="drone", track_id=1, ppe=None, bbox=bbox)
+
+    # 情境 1:person#1 在 seq 2 缺框,drone#1 三幀都在 —— 洞必須被認出來
+    for person_first in (True, False):
+        rows = [
+            (1, person([0.10, 0.10, 0.20, 0.30]), drone([0.80, 0.60, 0.84, 0.64])),
+            (2, None, drone([0.81, 0.61, 0.85, 0.65])),
+            (3, person([0.30, 0.10, 0.40, 0.30]), drone([0.82, 0.62, 0.86, 0.66])),
+        ]
+        frames = []
+        for seq, p, d in rows:
+            dets = [p, d] if person_first else [d, p]
+            frames.append(frame_of(seq, [x for x in dets if x is not None]))
+
+        plan = interpolate_missing(frames, "person", 1, max_gap=10)
+        order = "person 在前" if person_first else "drone 在前"
+        ok = len(plan.additions) == 1
+        check(ok, f"[{order}] drone#1 不會把 person#1 的洞填掉(補出 "
+                  f"{len(plan.additions)} 個,預期 1)")
+        if ok:
+            idx, det = plan.additions[0]
+            check(frames[idx].seq == 2 and det.label == "person",
+                  f"[{order}] 補在 seq {frames[idx].seq} 且 label={det.label}")
+            check(det.bbox == [0.2, 0.1, 0.3, 0.3],
+                  f"[{order}] bbox 取 person 兩端中點 {det.bbox}")
+
+        # 反過來:drone#1 沒有洞,不該補出任何東西
+        plan_d = interpolate_missing(frames, "drone", 1, max_gap=10)
+        check(not plan_d.additions,
+              f"[{order}] drone#1 每幀都在,不該補(實際 {len(plan_d.additions)})")
+
+    # 情境 2:兩條軌跡各缺不同幀 —— 不得跨 label 配對出捏造的框
+    frames = [
+        frame_of(1, [person([0.10, 0.10, 0.20, 0.30])]),
+        frame_of(2, []),
+        frame_of(3, [drone([0.80, 0.60, 0.84, 0.64])]),
+    ]
+    plan = interpolate_missing(frames, "person", 1, max_gap=10)
+    check(not plan.additions,
+          f"seq1 只有 person#1、seq3 只有 drone#1 → 不得跨 label 內插"
+          f"(實際補出 {[d.bbox for _, d in plan.additions]})")
+
+
 def test_canonical_bbox() -> None:
     section("canonical_bbox 邊界處理")
     check(canonical_bbox([0.6, 0.7, 0.2, 0.3]) == [0.2, 0.3, 0.6, 0.7], "反向座標會被排序")
@@ -260,6 +329,7 @@ def main() -> int:
         test_preserves_unknown_det_fields(work)
         test_edit_roundtrip(work)
 
+    test_interpolate_is_per_label()
     test_canonical_bbox()
     test_transform_roundtrip()
 

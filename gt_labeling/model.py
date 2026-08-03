@@ -216,9 +216,16 @@ class Interpolation:
 
 
 def interpolate_missing(
-    frames: list[FrameLabel], track_id: int, max_gap: int
+    frames: list[FrameLabel], label: str, track_id: int, max_gap: int
 ) -> Interpolation:
-    """對同一 track 的相鄰錨點之間補上線性內插的框。
+    """對同一條軌跡的相鄰錨點之間補上線性內插的框。
+
+    軌跡的身分是 ``(label, track_id)`` 而不是單獨的 ``track_id``:下游
+    ``eval_gt.py`` 讀 GT 時就把 person / drone 拆成兩個清單各自評估(MOT 還加
+    id_prefix 區分),``gt_densify.py --drone-id`` 也只保證「同一架 drone 統一
+    成一個號」,不保證跟 person 不撞。只認 track_id 的話,person#1 與 drone#1
+    會被當成同一條軌跡——輕則洞被對方的框填掉而靜默不補,重則兩端錨點分屬不同
+    label,內插出一個地面與天花板中點的捏造框。
 
     只在「間距 <= max_gap」時補。這個門檻同時擋兩件事:內插誤差(實測 20 幀間距
     IoU 中位 0.78、失準率 0.2%,30 幀就跳到 9.3%),以及**遮擋**——目標被擋住的
@@ -228,7 +235,10 @@ def interpolate_missing(
     """
     anchors: list[tuple[int, int, Det]] = []
     for index, frame in enumerate(frames):
-        match = next((d for d in frame.dets if d.track_id == track_id), None)
+        match = next(
+            (d for d in frame.dets if d.track_id == track_id and d.label == label),
+            None,
+        )
         if match is not None:
             anchors.append((index, frame.seq, match))
 

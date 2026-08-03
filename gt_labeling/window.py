@@ -495,7 +495,7 @@ class MainWindow(QMainWindow):
             return
 
         max_gap = self.interp_panel.max_gap()
-        plan = interpolate_missing(self.frames, det.track_id, max_gap)
+        plan = interpolate_missing(self.frames, det.label, det.track_id, max_gap)
         if not plan.additions:
             if plan.skipped:
                 shortest = min(g for _, _, g in plan.skipped)
