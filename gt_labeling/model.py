@@ -4,6 +4,10 @@
 
 * **只替換 ``raw["dets"]``**。``type / version / source / seq / frame_index /
   video_sec / size / image`` 連 key 順序都是原本那顆 dict,不重建。
+* **det 也一樣**:只覆寫 ``label / track_id / ppe / bbox``,其餘欄位連 key 順序
+  原樣帶回。上游 ``gt_densify.py`` 會寫 ``src``(anchor / det / interp),
+  ``eval_gt.py`` 靠它算「多少比例的框取自系統輸出」——剝掉不會讓任何流程報錯,
+  只會讓那個比例悄悄低報,所以這條是硬性契約。
 * 行尾(CRLF/LF)、UTF-8 BOM、結尾換行都照原檔還原,所以 dets 沒改時存回去
   是 **byte 完全相同**,不只是欄位值相同。
 * ``bbox`` 一律寫成 5 位小數、clamp 到 ``[0,1]``、保證 ``x1<x2`` / ``y1<y2``。
@@ -53,9 +57,13 @@ class Det:
     track_id: int | None = None
     ppe: str | None = None
     bbox: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
+    # 讀進來的原始 det,**視為唯讀**:存檔時當底、只覆寫本工具負責的四個欄位,
+    # 產生它的上游(gt_densify 的 src 等)寫了什麼就原樣還回去。
+    raw: dict = field(default_factory=dict, repr=False)
 
     def clone(self) -> Det:
-        return Det(self.label, self.track_id, self.ppe, list(self.bbox))
+        # raw 共享參考而非複製:它從不被修改,而 clone 走在 undo 快照的熱路徑上。
+        return Det(self.label, self.track_id, self.ppe, list(self.bbox), self.raw)
 
     @property
     def is_person(self) -> bool:
@@ -67,12 +75,14 @@ class Det:
         return self.track_id is None or (self.is_person and self.ppe is None)
 
     def to_json(self) -> dict:
-        return {
-            "label": self.label,
-            "track_id": self.track_id,
-            "ppe": self.ppe if self.is_person else None,
-            "bbox": canonical_bbox(self.bbox),
-        }
+        # 以原始 det 當底再覆寫:更新既有 key 不會改變 dict 的順序,所以連
+        # key 排列都跟讀進來時一樣;上游多寫的欄位(src 等)也原封不動帶回去。
+        out = dict(self.raw)
+        out["label"] = self.label
+        out["track_id"] = self.track_id
+        out["ppe"] = self.ppe if self.is_person else None
+        out["bbox"] = canonical_bbox(self.bbox)
+        return out
 
     def display_text(self) -> str:
         parts = [self.label, f"#{self.track_id}" if self.track_id is not None else "#?"]
@@ -183,6 +193,7 @@ def load_frame(path: Path) -> FrameLabel:
             track_id=None if d.get("track_id") is None else int(d["track_id"]),
             ppe=d.get("ppe"),
             bbox=[float(v) for v in d.get("bbox", (0.0, 0.0, 0.0, 0.0))],
+            raw=d,
         )
         for d in raw.get("dets", [])
     ]

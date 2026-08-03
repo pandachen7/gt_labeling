@@ -66,6 +66,47 @@ def test_unchanged_save_is_byte_identical(root: Path) -> None:
     check(forced == len(entries), f"強制重寫後仍 byte 相同:{forced}/{len(entries)}")
 
 
+def test_preserves_unknown_det_fields(root: Path) -> None:
+    """det 上工具不認識的欄位不得在存檔時消失。
+
+    gt_densify.py 會在每個 det 寫 src(anchor / det / interp),eval_gt.py 靠它算
+    「多少比例的框直接取自系統輸出」。把它剝掉不會壞掉任何流程,只會讓那個比例
+    悄悄低報——正是最難察覺的那種錯。
+    """
+    section("det 的未知欄位:讀寫後原樣保留")
+    entry = scan_root(root)[0]
+    raw = json.loads(entry.label_path.read_bytes().decode("utf-8"))
+    for i, det in enumerate(raw["dets"]):
+        det["src"] = "anchor" if i % 2 == 0 else "interp"
+        det["conf"] = 0.875
+    body = json.dumps(raw, indent=2, ensure_ascii=False).replace("\n", "\r\n")
+    entry.label_path.write_bytes(body.encode("utf-8"))
+    before = entry.label_path.read_bytes()
+    key_order = [list(d.keys()) for d in raw["dets"]]
+
+    frame = load_frame(entry.label_path)
+    check(not frame.dirty, "含未知欄位的檔案讀進來不會被誤判為已改")
+    frame.save(force=True)
+    check(entry.label_path.read_bytes() == before,
+          "未編輯強制重寫:byte 完全相同(src / conf 沒被剝掉)")
+
+    frame.dets[0].bbox = [v + 0.01 for v in frame.dets[0].bbox]
+    frame.dets[1].ppe = "ng" if frame.dets[1].is_person else None
+    check(frame.save(), "編輯後存檔")
+    saved = json.loads(entry.label_path.read_bytes().decode("utf-8"))
+    check(all("src" in d for d in saved["dets"]), "編輯存檔後每個 det 的 src 都還在")
+    check([d.get("src") for d in saved["dets"]] == [d["src"] for d in raw["dets"]],
+          "src 的值沒有被改動")
+    check([list(d.keys()) for d in saved["dets"]] == key_order,
+          f"det 的 key 順序不變:{saved['dets'][0].keys()}")
+
+    frame.dets.append(Det(label="drone", track_id=9, ppe=None, bbox=[0.1, 0.1, 0.2, 0.2]))
+    frame.save()
+    saved = json.loads(entry.label_path.read_bytes().decode("utf-8"))
+    check(list(saved["dets"][-1].keys()) == ["label", "track_id", "ppe", "bbox"],
+          f"工具新增的框只寫四個欄位,不憑空捏造 src:{list(saved['dets'][-1].keys())}")
+
+
 def test_edit_roundtrip(root: Path) -> None:
     section("編輯 -> 存檔 -> 重開:座標零漂移、非 dets 欄位不動")
     entries = scan_root(root)
@@ -216,6 +257,7 @@ def main() -> int:
         print(f"工作副本:{work}")
 
         test_unchanged_save_is_byte_identical(work)
+        test_preserves_unknown_det_fields(work)
         test_edit_roundtrip(work)
 
     test_canonical_bbox()
