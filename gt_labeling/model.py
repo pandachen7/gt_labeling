@@ -294,6 +294,20 @@ class Interpolation:
         return sorted({i for i, _ in self.additions})
 
 
+def _wrap_align(target: list[float], reference: list[float]) -> list[float]:
+    """把 ``target`` 的 x 平移整數圈,使其中心離 ``reference`` 中心最近。
+
+    equirect 的 x 是環狀的:0.02 與 0.97 相隔 0.05,不是 0.95。兩個錨點各自被
+    正規化到 [0,1) 之後,這個資訊就只能靠「差幾圈」還原。
+    """
+    centre_t = (target[0] + target[2]) * 0.5
+    centre_r = (reference[0] + reference[2]) * 0.5
+    shift = round(centre_r - centre_t)
+    if shift == 0:
+        return list(target)
+    return [target[0] + shift, target[1], target[2] + shift, target[3]]
+
+
 def interpolate_missing(
     frames: list[FrameLabel], label: str, track_id: int, max_gap: int
 ) -> Interpolation:
@@ -311,6 +325,9 @@ def interpolate_missing(
     區段人不會去標錨點,於是間距自然拉大而被拒絕,不會憑空生出錯誤的框。
 
     權重用 ``seq`` 差而非清單位置差,抽樣不連續的資料集也不會算歪。
+
+    equirect 資料(``frames[0].wrap_x``)的 x 是環狀的:後錨點先被平移到前錨點的同一圈
+    再內插,否則一個走過接縫的人會補出一串從畫面右邊橫掃到左邊的假框。
     """
     anchors: list[tuple[int, int, Det]] = []
     for index, frame in enumerate(frames):
@@ -321,6 +338,7 @@ def interpolate_missing(
         if match is not None:
             anchors.append((index, frame.seq, match))
 
+    wrap = bool(frames) and frames[0].wrap_x
     result = Interpolation()
     for (i0, s0, d0), (i1, s1, d1) in zip(anchors, anchors[1:], strict=False):
         if i1 - i0 <= 1:
@@ -329,12 +347,14 @@ def interpolate_missing(
         if span > max_gap:
             result.skipped.append((s0, s1, span))
             continue
+        # 環景:先把後錨點平移到前錨點的同一圈,線性內插才走最短弧。
+        end = _wrap_align(d1.bbox, d0.bbox) if wrap else d1.bbox
         for k in range(i0 + 1, i1):
             t = (frames[k].seq - s0) / max(span, 1)
-            bbox = [d0.bbox[m] + (d1.bbox[m] - d0.bbox[m]) * t for m in range(4)]
+            bbox = [d0.bbox[m] + (end[m] - d0.bbox[m]) * t for m in range(4)]
             result.additions.append(
                 (k, Det(label=d0.label, track_id=track_id, ppe=d0.ppe,
-                        bbox=canonical_bbox(bbox)))
+                        bbox=canonical_bbox(bbox, wrap)))
             )
     return result
 

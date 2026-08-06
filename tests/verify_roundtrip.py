@@ -265,6 +265,53 @@ def test_interpolate_is_per_label() -> None:
           f"(實際補出 {[d.bbox for _, d in plan.additions]})")
 
 
+def test_interpolate_wraps_shortest_arc() -> None:
+    """跨接縫的兩個錨點之間,補出來的框必須走最短弧,不能橫掃整張圖。
+
+    錨點 A 在 x≈0.97、錨點 B 在 x≈0.02,兩者實際只差 0.05 個畫面寬(人走過接縫)。
+    直接對座標線性內插會讓中間的框從右邊一路掃到左邊,產生一串完全錯誤的 GT。
+    """
+    section("補框:跨接縫走最短弧")
+
+    def frame_of(seq: int, dets: list[Det], wrap: bool) -> FrameLabel:
+        raw = {"type": "gt", "version": 1, "seq": seq, "size": [3840, 1920], "dets": []}
+        frame = FrameLabel(path=Path(f"{seq:06d}.json"), raw=raw, dets=dets,
+                           style=TextStyle())
+        frame.wrap_x = wrap
+        return frame
+
+    def person(bbox: list[float]) -> Det:
+        return Det(label="person", track_id=1, ppe="ng", bbox=bbox)
+
+    # A 在 0.96~0.99,B 在 0.01~0.04(= A 往右走 0.05 圈後的位置)
+    frames = [
+        frame_of(1, [person([0.96, 0.5, 0.99, 0.7])], wrap=True),
+        frame_of(2, [], wrap=True),
+        frame_of(3, [person([0.01, 0.5, 0.04, 0.7])], wrap=True),
+    ]
+    plan = interpolate_missing(frames, "person", 1, max_gap=10)
+    check(len(plan.additions) == 1, f"補出 1 個框(實際 {len(plan.additions)})")
+    if plan.additions:
+        bbox = plan.additions[0][1].bbox
+        width = round((bbox[2] - bbox[0]) % 1.0, 5)
+        check(width == 0.03, f"補出的框寬度仍是 0.03,沒有被拉長 {bbox}")
+        # 中點應落在 0.985 與 1.025 之間,取模後 = 0.985 或 0.005 附近
+        centre = ((bbox[0] + bbox[2]) * 0.5) % 1.0
+        check(centre > 0.98 or centre < 0.02,
+              f"中點落在接縫附近而不是畫面中央 {centre:.5f}")
+
+    # 非環景模式下維持原本的逐座標內插(不得偷偷改變既有行為)
+    flat = [
+        frame_of(1, [person([0.96, 0.5, 0.99, 0.7])], wrap=False),
+        frame_of(2, [], wrap=False),
+        frame_of(3, [person([0.01, 0.5, 0.04, 0.7])], wrap=False),
+    ]
+    plan_flat = interpolate_missing(flat, "person", 1, max_gap=10)
+    check(plan_flat.additions and plan_flat.additions[0][1].bbox == [0.485, 0.5, 0.515, 0.7],
+          f"非環景維持原本的直線內插 "
+          f"{plan_flat.additions[0][1].bbox if plan_flat.additions else None}")
+
+
 def test_canonical_bbox() -> None:
     section("canonical_bbox 邊界處理")
     check(canonical_bbox([0.6, 0.7, 0.2, 0.3]) == [0.2, 0.3, 0.6, 0.7], "反向座標會被排序")
@@ -413,6 +460,7 @@ def main() -> int:
         test_edit_roundtrip(work)
 
     test_interpolate_is_per_label()
+    test_interpolate_wraps_shortest_arc()
     test_canonical_bbox()
     test_frame_wrap_state()
     test_transform_roundtrip()
