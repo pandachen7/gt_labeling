@@ -215,6 +215,18 @@ def main() -> int:
               f"(預期 index {seam_det},實際 {canvas.selected_index})")
         del window.frames[window.index].dets[seam_det]
         canvas.reload_dets()
+
+        # _shifts() 必須比 visible_shifts 兩端各多一圈。visible_shifts 只答「哪幾圈的
+        # 影像與視窗相交」,而框不一樣:寬度最多一整圈,且拖曳中的框 x1 可以為負、
+        # x2 可以超過 1(環景下 x 夾限被移除),繞回來的那一段因此落在影像圈之外。
+        # 少了低端那一圈 → 往右拖過接縫時繞回段消失;少了高端 → 往左拖時消失。
+        # 這一條直接盯 _shifts() 的範圍:visible_shifts 的數學修前修後都一樣,
+        # 只驗它分不出「擴一端」與「擴兩端」的差別。
+        base = list(canvas.tf.visible_shifts(float(canvas.width())))
+        got = list(canvas._shifts())
+        check(got == list(range(base[0] - 1, base[-1] + 2)),
+              f"_shifts() 兩端各多一圈:visible_shifts={base} → _shifts()={got}")
+
         # 收尾以 model 為準恢復檢視狀態,**不要**寫死 False:Task 6 之後 3840x1920
         # 會自動進環景,寫死 False 會讓後續區段的環景斷言假 FAIL。
         canvas.tf.wrap_x = window.frames[window.index].wrap_x
