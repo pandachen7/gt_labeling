@@ -47,6 +47,7 @@ from .panel import (
     FrameListPanel,
     InterpolatePanel,
     NewDetPanel,
+    RemapRangeDialog,
 )
 
 UNDO_LIMIT = 60
@@ -65,7 +66,8 @@ A / ← 上一張    D / → 下一張    Home / End 首幀 / 末幀
 Delete 刪除選取框(焦點在畫布)    F 還原檢視
 Ctrl+S 存檔   Ctrl+Z 復原   Ctrl+Shift+Z 重做
 Ctrl+I 補框(選取框的 track)   Ctrl+R 改 id(整條軌跡換號)
-幀清單 Shift / Ctrl 多選 + Delete 刪整段軌跡(Ctrl+Shift+D)
+幀清單 Shift / Ctrl 多選 → 刪整段軌跡(Delete / Ctrl+Shift+D)
+  或只改那一段的 id(Ctrl+Shift+R),範圍外維持舊號
 Ctrl+Shift+I 復原上次批次(補框 / 改 id / 刪軌跡)
 Ctrl+F 找 track(F3 下一個 / Shift+F3 上一個)
   搜尋欄內:Enter 下一個 / Shift+Enter 上一個 / Esc 回畫布"""
@@ -208,6 +210,13 @@ class MainWindow(QMainWindow):
         self.act_delete = QAction("刪除框", self)
         self.act_delete.triggered.connect(self.canvas.delete_selected)
 
+        self.act_remap_range = QAction("改選取幀內的軌跡 id…", self)
+        self.act_remap_range.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self.act_remap_range.setToolTip(
+            "只把選取的那幾幀裡的 track 換號,範圍外維持舊號 —— 用在 tracker 把"
+            "某一段誤配給別的目標時(Ctrl+Shift+R)")
+        self.act_remap_range.triggered.connect(self._remap_range)
+
         self.act_delete_track = QAction("刪除選取幀內的軌跡…", self)
         self.act_delete_track.setShortcut(QKeySequence("Ctrl+Shift+D"))
         self.act_delete_track.setToolTip(
@@ -267,6 +276,7 @@ class MainWindow(QMainWindow):
         menu_edit.addSeparator()
         menu_edit.addAction(self.act_delete)
         menu_edit.addAction(self.act_delete_track)
+        menu_edit.addAction(self.act_remap_range)
         menu_edit.addAction(self.act_interp)
         menu_edit.addAction(self.act_remap)
         menu_edit.addAction(self.act_bulk_undo)
@@ -279,9 +289,9 @@ class MainWindow(QMainWindow):
         # 它們不需要按鈕——入口是鍵盤與畫布,擺出來只是佔位。
         for action in (
             self.act_open, self.act_save, self.act_undo, self.act_redo,
-            self.act_delete, self.act_delete_track, self.act_fit, self.act_interp,
-            self.act_remap, self.act_bulk_undo, self.act_autosave,
-            self.act_prev, self.act_next,
+            self.act_delete, self.act_delete_track, self.act_remap_range,
+            self.act_fit, self.act_interp, self.act_remap, self.act_bulk_undo,
+            self.act_autosave, self.act_prev, self.act_next,
         ):
             self.addAction(action)
 
@@ -890,6 +900,70 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Ok:
             self.apply_remap(plan, label, old_id, new_id)
 
+    def _remap_preview(
+        self, rows: list[int], label: str, old_id: int, new_id: int
+    ) -> tuple[int, str]:
+        """對話框用的即時試算:這一段改號會動到幾個框、之後會變成什麼樣子。"""
+        if old_id == new_id:
+            return 0, "新舊號碼相同,沒有東西要改。"
+        plan = plan_remap(self.frames, label, old_id, new_id, rows)
+        if not plan.targets:
+            return 0, f"選取的這幾幀裡沒有 {label} #{old_id} 的框。"
+
+        lines = [f"命中 {len(plan.frame_indexes)} 幀 / {plan.box_count} 個框。"]
+        # 改完之後這條軌跡會長什麼樣,是按下確定前最該知道的事:拆成兩段?接上
+        # 既有的另一段?人在清單上拉範圍時這兩件事都看不出來。
+        lines.append(
+            f"範圍外還有 {plan.outside} 個框留著 #{old_id}(這條會拆成兩段)。"
+            if plan.outside
+            else f"範圍已涵蓋整條軌跡,#{old_id} 會從整份資料集消失。"
+        )
+        if plan.merges:
+            lines.append(f"範圍外已有 {plan.merges} 個框是 #{new_id},改完接成同一條。")
+        if plan.conflicts:
+            listed = ", ".join(str(s) for s in plan.conflicts[:CONFLICT_PREVIEW])
+            more = (f" …等 {len(plan.conflicts)} 幀"
+                    if len(plan.conflicts) > CONFLICT_PREVIEW else "")
+            lines.append(
+                f"⚠ {len(plan.conflicts)} 幀改完會同時出現兩個 #{new_id}:"
+                f"seq {listed}{more}")
+        return plan.box_count, "\n".join(lines)
+
+    def _remap_range(self) -> None:
+        """只把選取的那幾幀裡的軌跡換號,範圍外維持舊號。
+
+        用在 tracker 把某一段誤配給別的目標:只有那一段要拆出來,``Ctrl+R`` 的
+        全域換號會把本來正確的部分一起改壞。
+
+        入口與「刪除選取幀內的軌跡」對稱(先圈範圍再開對話框),與 ``Ctrl+R``
+        的「先點框」刻意分開:兩種前置條件混在同一個入口只會讓人搞不清該先做哪
+        一步。
+        """
+        if not self.frames:
+            return
+        rows = self.list_panel.selected_rows()
+        if not rows:
+            self.statusBar().showMessage(
+                "先在左邊幀清單選要改號的那幾幀(Shift 拉連續 / Ctrl 加點零散的)", 6000)
+            return
+
+        seqs = [self.frames[i].seq for i in rows]
+        dialog = RemapRangeDialog(
+            f"選取 {len(rows)} 幀(seq {min(seqs)}..{max(seqs)})",
+            lambda label, old_id, new_id: self._remap_preview(rows, label, old_id, new_id),
+            self._last_track,
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        target = dialog.target()
+        if target is None:
+            return
+        label, old_id, new_id = target
+        plan = plan_remap(self.frames, label, old_id, new_id, rows)
+        if plan.targets:
+            self.apply_remap(plan, label, old_id, new_id)
+
     def apply_remap(self, plan: Remap, label: str, old_id: int, new_id: int) -> None:
         """套用一份換號計畫。與 ``_remap_track`` 的對話框分開,方便直接驗收。"""
         touched = plan.frame_indexes
@@ -1154,6 +1228,7 @@ class MainWindow(QMainWindow):
         self.act_interp.setEnabled(has_data)
         self.act_remap.setEnabled(has_data)
         self.act_delete_track.setEnabled(has_data)
+        self.act_remap_range.setEnabled(has_data)
         self.act_bulk_undo.setEnabled(bool(self._last_bulk))
         for action in (self.act_find, self.act_find_next, self.act_find_prev):
             action.setEnabled(has_data)

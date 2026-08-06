@@ -228,6 +228,98 @@ class DeleteTrackDialog(QDialog):
         return (self.kind_box.currentText(), int(text)) if text else None
 
 
+class RemapRangeDialog(QDialog):
+    """把一條軌跡在選取幀範圍內改成另一個號碼。
+
+    與 :class:`DeleteTrackDialog` 刻意寫成兩個獨立對話框而不抽共用基底:它們只有
+    「選一組 (label, id) + 即時預覽」這層外殼像,欄位數與後果完全不同(一個是
+    破壞性刪除,一個是可逆的改號),硬併起來會變成一堆條件分支。真要抽,等出現
+    第三個再說。
+
+    ``Ctrl+R`` 的全域換號是另一個動作、另一個入口:那是「這條軌跡整條都編錯號」,
+    這裡是「只有這一段編錯」。混在同一個入口會讓「先點框」與「先圈範圍」兩種前置
+    糊在一起。
+    """
+
+    def __init__(
+        self,
+        scope: str,
+        preview: Callable[[str, int, int], tuple[int, str]],
+        initial: tuple[str, int] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("改軌跡片段的 id")
+        self._preview = preview
+
+        self.kind_box = QComboBox(self)
+        self.kind_box.addItems(LABELS)
+        self.kind_box.currentIndexChanged.connect(lambda _: self._refresh())
+
+        self.old_edit = self._make_id_edit("要改的 track_id")
+        self.new_edit = self._make_id_edit("改成哪個號碼")
+
+        self.detail = QLabel("", self)
+        self.detail.setWordWrap(True)
+        self.detail.setMinimumWidth(360)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        form = QFormLayout()
+        form.addRow(QLabel(scope, self))
+        form.addRow("label", self.kind_box)
+        form.addRow("舊 track_id", self.old_edit)
+        form.addRow("新 track_id", self.new_edit)
+        form.addRow(self.detail)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self.buttons)
+
+        if initial is not None:
+            label, track_id = initial
+            index = self.kind_box.findText(label)
+            if index >= 0:
+                self.kind_box.setCurrentIndex(index)
+            self.old_edit.setText(str(track_id))
+        self._refresh()
+        # 游標落在「新號碼」而不是「舊號碼」:舊號多半已由最後點過的框預填好,
+        # 人打開這個視窗要打的就是新號。
+        self.new_edit.setFocus()
+
+    def _make_id_edit(self, placeholder: str) -> QLineEdit:
+        edit = QLineEdit(self)
+        edit.setValidator(QIntValidator(0, 2_000_000_000, self))
+        edit.setPlaceholderText(placeholder)
+        edit.textChanged.connect(lambda _: self._refresh())
+        return edit
+
+    def _refresh(self) -> None:
+        target = self.target()
+        if target is None:
+            self.detail.setText("兩個號碼都要填。")
+            count, ok_text = 0, "改號"
+        else:
+            count, summary = self._preview(*target)
+            self.detail.setText(summary)
+            ok_text = f"改 {count} 個框" if count else "改號"
+        ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setText(ok_text)
+        ok.setEnabled(count > 0)
+
+    def target(self) -> tuple[str, int, int] | None:
+        old_text = self.old_edit.text().strip()
+        new_text = self.new_edit.text().strip()
+        if not old_text or not new_text:
+            return None
+        return self.kind_box.currentText(), int(old_text), int(new_text)
+
+
 class NewDetPanel(QWidget):
     """畫新框時要套用的預設屬性。
 

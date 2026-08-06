@@ -284,10 +284,12 @@ def interpolate_missing(
 
 @dataclass(slots=True)
 class Remap:
-    """一次 id 轉換的計畫:要改哪些框、哪些幀改完會同幀撞號。"""
+    """一次 id 轉換的計畫:要改哪些框、哪些幀改完會同幀撞號、範圍外剩下什麼。"""
 
     targets: list[tuple[int, Det]] = field(default_factory=list)  # (frame index, 要改號的框)
     conflicts: list[int] = field(default_factory=list)  # 改完會出現兩個同號框的 seq
+    outside: int = 0  # 範圍外仍是 old_id 的框數(限定範圍時才可能非 0)
+    merges: int = 0  # 範圍外已經是 new_id 的框數:改完會跟它們接成同一條
 
     @property
     def frame_indexes(self) -> list[int]:
@@ -298,10 +300,20 @@ class Remap:
         return len(self.targets)
 
 
-def plan_remap(frames: list[FrameLabel], label: str, old_id: int, new_id: int) -> Remap:
-    """算出把 ``(label, old_id)`` 全域改成 ``new_id`` 會動到哪些框。
+def plan_remap(
+    frames: list[FrameLabel],
+    label: str,
+    old_id: int,
+    new_id: int,
+    frame_indexes: Iterable[int] | None = None,
+) -> Remap:
+    """算出把 ``(label, old_id)`` 改成 ``new_id`` 會動到哪些框。
 
     tracker 斷軌時同一個目標會被切成兩個號碼,逐幀改號很慢,所以整條軌跡一次換號。
+
+    ``frame_indexes`` 留 ``None`` 就是**全域**換號(斷軌接回原本的用法);給一組幀
+    就只改那幾幀。限定範圍是另一種錯誤要的:tracker 會在某一段把 A 的框誤配給 B 的
+    號碼,只有那一段要拆出來,全域換號會把本來正確的部分一起改壞。
 
     軌跡身分是 ``(label, track_id)``,理由同 :func:`interpolate_missing`:只認
     track_id 的話,把 person#7 改成 #3 會連 drone#7 一起改號——而下游把 person /
@@ -311,15 +323,27 @@ def plan_remap(frames: list[FrameLabel], label: str, old_id: int, new_id: int) -
     的 seq:改完那一幀會出現兩個同號框,通常代表這兩段其實不是同一個目標。反過來,
     只有 new_id 沒有 old_id 的幀不算衝突——斷軌合併的正常樣貌就是兩段各佔不同的幀。
 
+    ``outside`` 與 ``merges`` 是限定範圍時才有意義的兩件事:改完之後,範圍外還有
+    幾個框留著舊號(這條軌跡會被拆成兩段),以及範圍外已經有幾個框用著新號(改完
+    會接成同一條)。兩者都是按下確定前該知道的,而人在清單上拉範圍時看不出來。
+
     只算不改;套用交給呼叫方,才能在中間插入確認與快照。
     """
+    scope = None if frame_indexes is None else set(frame_indexes)
     result = Remap()
     for index, frame in enumerate(frames):
         hits = [d for d in frame.dets if d.label == label and d.track_id == old_id]
+        wearing_new = sum(
+            1 for d in frame.dets if d.label == label and d.track_id == new_id
+        )
+        if scope is not None and index not in scope:
+            result.outside += len(hits)
+            result.merges += wearing_new
+            continue
         if not hits:
             continue
         result.targets.extend((index, d) for d in hits)
-        if any(d.label == label and d.track_id == new_id for d in frame.dets):
+        if wearing_new:
             result.conflicts.append(frame.seq)
     return result
 

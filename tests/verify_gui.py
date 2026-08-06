@@ -832,6 +832,99 @@ def main() -> int:
               "還原後這幾幀回到已存狀態")
         frame_list.clearSelection()
 
+        section("只改選取幀內的 track_id")
+        check(window.act_remap_range.shortcut() == QKeySequence("Ctrl+Shift+R"),
+              f"快捷鍵 Ctrl+Shift+R"
+              f"(實際 {window.act_remap_range.shortcut().toString()})")
+        check(window.act_remap_range in window.menuBar().actions()[1].menu().actions(),
+              "「改選取幀內的軌跡 id…」收在「編輯」選單裡")
+
+        frame_list.clearSelection()
+        ids_untouched = [(d.label, d.track_id) for f in window.frames for d in f.dets]
+        window._remap_range()
+        app.processEvents()
+        check([(d.label, d.track_id) for f in window.frames for d in f.dets]
+              == ids_untouched, "沒選任何幀時不動資料")
+        check("幀清單" in window.statusBar().currentMessage(),
+              f"且有說明原因:{window.statusBar().currentMessage()!r}")
+
+        # 圈出同一段,把它改成一個沒人用的號碼 —— 這正是 tracker 把某一段誤配給
+        # 別的目標時要做的事:只拆那一段,其餘維持原號。
+        frame_list.setFocus()
+        frame_list.setCurrentRow(del_lo)
+        app.processEvents()
+        for _ in range(del_hi - del_lo):
+            QTest.keyClick(frame_list, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+        app.processEvents()
+        spare_id = max(d.track_id for f in window.frames for d in f.dets
+                       if d.track_id is not None) + 500
+        inside_before = sum(1 for i in doomed_rows
+                            for d in window.frames[i].dets if on_track(d))
+        outside_before = sum(1 for i in kept_rows
+                             for d in window.frames[i].dets if on_track(d))
+
+        ranged = plan_remap(window.frames, probe_label, probe_tid, spare_id,
+                            window.list_panel.selected_rows())
+        check(ranged.box_count == inside_before,
+              f"算出只改範圍內的 {inside_before} 個框(實際 {ranged.box_count})")
+        check(ranged.outside == outside_before,
+              f"回報範圍外還有 {outside_before} 個框留著舊號(實際 {ranged.outside})")
+        check(not ranged.conflicts,
+              f"目標號沒人用 → 沒有撞號警告(實際 {ranged.conflicts})")
+        # 不帶範圍就該是全域,既有呼叫端的行為一個字都不能變。
+        whole = plan_remap(window.frames, probe_label, probe_tid, spare_id)
+        check(whole.box_count == inside_before + outside_before,
+              f"不帶範圍仍是全域換號(實際 {whole.box_count} 個框)")
+        check(whole.outside == 0 and whole.merges == 0,
+              "全域模式沒有「範圍外」可言,兩個計數都是 0")
+
+        opened_remap: list = []
+        catch_dialog(opened_remap, accept=True)
+        window.act_remap_range.trigger()
+        app.processEvents()
+        window.activateWindow()
+        app.processEvents()
+        check(len(opened_remap) == 1
+              and opened_remap[0].windowTitle() == "改軌跡片段的 id",
+              f"跳出對話框(實際 {[d.windowTitle() for d in opened_remap]})")
+        if opened_remap:
+            remap_dialog = opened_remap[0]
+            check(remap_dialog.old_edit.text() == str(probe_tid),
+                  f"舊號預填最後點過的那條(實際 {remap_dialog.old_edit.text()!r})")
+            check(remap_dialog.new_edit.text() == "", "新號留白等人填")
+        # 上面 accept 時新號還空著,target() 是 None —— 不能因此改壞任何資料。
+        check([(d.label, d.track_id) for f in window.frames for d in f.dets]
+              == ids_untouched, "新號沒填就按確定也不動資料")
+
+        window.apply_remap(ranged, probe_label, probe_tid, spare_id)
+        app.processEvents()
+        check(all(not any(on_track(d) for d in window.frames[i].dets)
+                  for i in doomed_rows),
+              f"範圍內的 {probe_label} #{probe_tid} 全部換成 #{spare_id}")
+        check(sum(1 for i in doomed_rows for d in window.frames[i].dets
+                  if d.label == probe_label and d.track_id == spare_id)
+              == inside_before,
+              f"換過去的框數對得上({inside_before} 個)")
+        check(all(any(on_track(d) for d in window.frames[i].dets) for i in kept_rows),
+              f"範圍外的 {len(kept_rows)} 幀仍是 #{probe_tid},沒被波及")
+
+        # 反過來算一次:此時範圍外已有一整段用著目標號,merges 要報得出來。
+        back = plan_remap(window.frames, probe_label, spare_id, probe_tid,
+                          window.list_panel.selected_rows())
+        check(back.merges == outside_before,
+              f"回報範圍外已有 {outside_before} 個框是 #{probe_tid},改完接成同一條"
+              f"(實際 {back.merges})")
+
+        window._undo_last_bulk()
+        app.processEvents()
+        check(all(any(on_track(d) for d in window.frames[i].dets) for i in doomed_rows),
+              "Ctrl+Shift+I 整組復原,號碼全部改回來")
+        check(not any(d.track_id == spare_id for f in window.frames for d in f.dets),
+              f"整份資料集不再有 #{spare_id}")
+        check(not any(window.frames[i].dirty for i in doomed_rows),
+              "還原後這幾幀回到已存狀態")
+        frame_list.clearSelection()
+
         section("清單待補標記")
         # 樣本資料不保證含 null,自己在記憶體造一個待補狀態再還原,驗證與資料內容無關。
         probe_row = next(
