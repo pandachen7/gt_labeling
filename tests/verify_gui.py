@@ -28,7 +28,6 @@ from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox
 from gt_labeling.canvas import COLOR_DRONE, det_color
 from gt_labeling.model import (
     Det,
-    canonical_bbox,
     find_track,
     interpolate_missing,
     load_frame,
@@ -567,20 +566,15 @@ def main() -> int:
         check(len(filled) == len(hole), f"套用後補回 {len(filled)}/{len(hole)} 幀")
 
         if len(filled) == len(hole):
-            # 驗的是內插的數學正確性,不是與真實框的 IoU:gt_sample 是 5 秒抽樣,
-            # 人走 5 秒後框本來就不重疊,那是資料特性,不是程式對錯。
-            a_i, b_i = rows[0], rows[4]
-            a = next(d for d in window.frames[a_i].dets if d.track_id == probe_tid)
-            b = next(d for d in window.frames[b_i].dets if d.track_id == probe_tid)
-            sa, sb = window.frames[a_i].seq, window.frames[b_i].seq
-            exact = True
-            for i in hole:
-                t = (window.frames[i].seq - sa) / (sb - sa)
-                want = canonical_bbox(
-                    [a.bbox[m] + (b.bbox[m] - a.bbox[m]) * t for m in range(4)]
-                )
-                exact = exact and filled[i].bbox == want
-            check(exact, f"補回的 bbox 等於兩錨點(seq {sa}/{sb})的線性內插值")
+            # 期望值直接取 interpolate_missing 的輸出,驗的是「apply_interpolation 真的把
+            # 算出來的框寫進了對應的幀」——那才是這一層(GUI)該負責的事。
+            # 內插本身的數學正確性由 tests/verify_roundtrip.py 的單元測試負責,含環景下
+            # 走最短弧的案例;在這裡重算一遍等於把實作抄進測試,實作一改它就過時
+            # (equirect 的最短弧就是這樣讓舊版本假 FAIL 的)。
+            want = {i: det.bbox for i, det in loose.additions}
+            exact = all(filled[i].bbox == want[i] for i in hole)
+            check(exact, f"補回的每個 bbox 都等於 interpolate_missing 算出的值"
+                         f"({len(hole)} 幀)")
 
             src = next(d for d in window.frames[rows[0]].dets if d.track_id == probe_tid)
             check(all(f.label == src.label and f.ppe == src.ppe for f in filled.values()),
