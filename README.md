@@ -14,14 +14,14 @@ GT 標註修正工具:檢視與修正物件偵測 ground truth 的 PyQt6 桌面�
 用 uv(不必手動啟用 venv):
 
 ```
-uv run --project D:\ws\gt_labeling python main.py D:\ws\detect_stream\out\gt_sample
+uv run --project D:\ws\gt_labeling python main.py D:\ws\detect_stream\out\gt_per_frames_0625_145125\000-020s
 ```
 
 或啟用 venv 後執行:
 
 ```
 D:\ws\gt_labeling> .venv\Scripts\activate
-(gt-labeling) D:\ws\gt_labeling> python main.py D:\ws\detect_stream\out\gt_sample
+(gt-labeling) D:\ws\gt_labeling> python main.py D:\ws\detect_stream\out\gt_per_frames_0625_145125\000-020s
 ```
 
 安裝成套件後也可以直接用 console script:
@@ -232,12 +232,18 @@ tracker 常在目標離場後還吐一串幽靈框,或某一段被誤配到別�
 
 ## 驗收
 
-兩支腳本都要指向一份真實的 `gt_sample` 資料夾:
+兩支腳本都要指向一份真實的資料夾(含 `frames/` 與 `labels/`),省略則用內建預設:
 
 ```
-uv run --project D:\ws\gt_labeling python scripts/verify_roundtrip.py <gt_sample_root>
-uv run --project D:\ws\gt_labeling python scripts/verify_gui.py <gt_sample_root>
+uv run --project D:\ws\gt_labeling python scripts/verify_roundtrip.py <gt_root>
+uv run --project D:\ws\gt_labeling python scripts/verify_gui.py <gt_root>
 ```
+
+預設指向 `D:\ws\detect_stream\out\gt_per_frames_0625_145125\000-020s`。那份 per-frame GT 按 `000-020s` 這樣分段,**每段自成一個 root**,要驗別段就把路徑帶上去。
+
+**原始資料一律只讀**:兩支腳本都先把 labels(`verify_gui.py` 連 frames 一起)複製到暫存目錄,所有編輯與存檔都發生在副本上,跑完連 mtime 都不會動到原檔。
+
+斷言一律**比相對變化量**,不寫死幀數、框數或重疊數 —— 換一份資料集就報假 FAIL 的驗收沒有價值。
 
 - [scripts/verify_roundtrip.py](scripts/verify_roundtrip.py):存檔往返不漂移、非 dets 欄位一字未動、座標換算可逆。
 - [scripts/verify_gui.py](scripts/verify_gui.py):offscreen 跑真的 GUI —— 真的開資料夾、真的用滑鼠事件改框、真的存檔再開一次比對。

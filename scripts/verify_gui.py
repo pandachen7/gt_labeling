@@ -1,6 +1,11 @@
 """驗收(GUI 層,offscreen):真的開資料夾、真的用滑鼠事件改框、真的存檔再開一次比對。
 
-    uv run --project D:\\ws\\gt_labeling python scripts/verify_gui.py <gt_sample_root>
+    uv run --project D:\\ws\\gt_labeling python scripts/verify_gui.py <gt_root>
+
+<gt_root> 是含 ``frames/`` 與 ``labels/`` 的單一資料夾。預設指向 per-frame GT 的
+第一個時段;那份 GT 按 ``000-020s`` 這樣分段,每段自成一個 root,要驗別段就把
+路徑換掉。原始資料一律只讀:所有編輯都發生在 ``prepare_workdir`` 複製出來的
+暫存副本上。
 """
 
 from __future__ import annotations
@@ -36,6 +41,8 @@ FAILURES: list[str] = []
 OUT_DIR = Path(__file__).resolve().parents[1] / "out"
 # 逐幀瀏覽最多走幾幀(夠測解碼成本就好,不必走完整份資料集)。
 WALK_FRAMES = 74
+# 用 Shift+↓ 拉選取範圍時最多拉幾列(同理:夠證明拉得出連續範圍就好)。
+SHIFT_RANGE_ROWS = 40
 
 
 def box_iou(a, b) -> float:
@@ -118,7 +125,10 @@ def drag(canvas, start: QPoint, end: QPoint, steps: int = 6) -> None:
 
 
 def main() -> int:
-    source = Path(sys.argv[1] if len(sys.argv) > 1 else r"D:\ws\detect_stream\out\gt_sample")
+    source = Path(
+        sys.argv[1] if len(sys.argv) > 1
+        else r"D:\ws\detect_stream\out\gt_per_frames_0625_145125\000-020s"
+    )
     if not (source / "labels").is_dir():
         print(f"找不到 {source}\\labels")
         return 2
@@ -338,6 +348,15 @@ def main() -> int:
         window.det_panel.track_edit.editingFinished.emit()
         app.processEvents()
         check(frame.dets[-1].track_id == 777, f"track_id 寫入 777(實際 {frame.dets[-1].track_id})")
+
+        # 改號後「沿用 #id」必須跟著換:停在舊號的話,接著補的錨點會默默掛回剛
+        # 淘汰掉的號碼,而畫面上沒有任何跡象。
+        check("#777" in window.new_panel.follow_radio.text(),
+              f"改 id 後沿用候選顯示 #777(實際 {window.new_panel.follow_radio.text()!r})")
+        window.new_panel.follow_radio.setChecked(True)
+        check(window.new_panel.follow_id() == 777,
+              f"改 id 後 follow_id() = {window.new_panel.follow_id()}(預期 777)")
+        window.new_panel.auto_radio.setChecked(True)
 
         window.det_panel.label_box.setCurrentText("drone")
         app.processEvents()
@@ -627,7 +646,12 @@ def main() -> int:
         check(window._last_track == (probe_label, probe_tid), "但記住的軌跡跨幀存活")
 
         # 真的用 Shift+↓ 拉範圍,不是直接呼叫 API 設選取 —— 要驗的正是這條路。
-        del_lo, del_hi = rows[0], rows[len(rows) // 2 - 1]
+        # 拉幾列要設上限:每按一次就切一幀、跟著解一張 3840x1920 的 JPEG,而
+        # per-frame GT 的軌跡動輒橫跨全部 600 幀,拉半條就要等上好幾十秒。要驗的是
+        # 「Shift 能不能拉出連續範圍」,幾十列就夠;上限只縮短範圍,不影響任何斷言
+        # (範圍外剩的框只會更多)。
+        del_lo = rows[0]
+        del_hi = min(rows[len(rows) // 2 - 1], del_lo + SHIFT_RANGE_ROWS)
         frame_list.setFocus()
         frame_list.setCurrentRow(del_lo)
         app.processEvents()

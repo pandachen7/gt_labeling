@@ -317,7 +317,10 @@ def test_transform_roundtrip() -> None:
 
 
 def main() -> int:
-    source = Path(sys.argv[1] if len(sys.argv) > 1 else r"D:\ws\detect_stream\out\gt_sample")
+    source = Path(
+        sys.argv[1] if len(sys.argv) > 1
+        else r"D:\ws\detect_stream\out\gt_per_frames_0625_145125\000-020s"
+    )
     if not (source / "labels").is_dir():
         print(f"找不到 {source}\\labels")
         return 2
