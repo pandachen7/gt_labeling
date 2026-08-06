@@ -154,10 +154,12 @@ class MainWindow(QMainWindow):
         self.lbl_frame = QLabel("—")
         self.lbl_boxes = QLabel("")
         self.lbl_state = QLabel("")
+        self.lbl_wrap = QLabel("")
         self.lbl_zoom = QLabel("")
         self.lbl_pos = QLabel("")
         bar = self.statusBar()
-        for widget in (self.lbl_frame, self.lbl_boxes, self.lbl_state, self.lbl_zoom):
+        for widget in (self.lbl_frame, self.lbl_boxes, self.lbl_state,
+                       self.lbl_wrap, self.lbl_zoom):
             bar.addWidget(widget)
         bar.addPermanentWidget(self.lbl_pos)
 
@@ -232,6 +234,12 @@ class MainWindow(QMainWindow):
         self.act_fit = QAction("還原檢視", self)
         self.act_fit.triggered.connect(self.canvas.fit_view)
 
+        self.act_wrap = QAction("環景模式(ERP)", self)
+        self.act_wrap.setCheckable(True)
+        # 不給快捷鍵:它改變的是**存檔語意**(x 要不要 clamp 回 [0,1]),
+        # 誤按一次就可能把跨縫框削掉,代價遠高於省一次點擊。
+        self.act_wrap.toggled.connect(self._apply_wrap_mode)
+
         self.act_autosave = QAction("切幀自動存", self)
         self.act_autosave.setCheckable(True)
         self.act_autosave.setChecked(True)
@@ -288,6 +296,8 @@ class MainWindow(QMainWindow):
 
         menu_view = self.menuBar().addMenu("檢視")
         menu_view.addAction(self.act_fit)
+        menu_view.addSeparator()
+        menu_view.addAction(self.act_wrap)
 
         # 進了選單還是要 addAction:快捷鍵綁在 QAction 本身,不靠選單成立,
         # 而導覽動作(上一張 / 下一張)兩處都不擺,少了這裡就整組失效。
@@ -488,6 +498,14 @@ class MainWindow(QMainWindow):
             self.undo_stacks.append(stack)
 
         self.store.clear()
+        # 2:1 就進環景模式。JSON 沒有、也不會加「這是 equirect」的欄位,size 是唯一
+        # 線索。load_frame 已依 size 設好每一幀的 wrap_x,這裡只把 UI 與檢視對齊 ——
+        # 不走 _apply_wrap_mode:它會連著把幀清單再刷一次,而下面本來就要刷一次。
+        wrap = bool(frames) and frames[0].is_equirect
+        self.act_wrap.blockSignals(True)
+        self.act_wrap.setChecked(wrap)
+        self.act_wrap.blockSignals(False)
+        self.canvas.set_wrap_x(wrap)
         self.list_panel.set_frames(frames)
         self.index = -1
         self._goto(0, force=True)
@@ -1272,14 +1290,30 @@ class MainWindow(QMainWindow):
         for action in (self.act_find, self.act_find_next, self.act_find_prev):
             action.setEnabled(has_data)
 
+    def _apply_wrap_mode(self, enabled: bool) -> None:
+        """切換環景模式:同步每一幀的存檔語意與畫布的檢視語意。
+
+        會讓含跨縫框的幀變成「未存」是正確的 —— 存出去的座標確實會不同。沒有跨縫框
+        的幀 dets_json() 不變,所以不會被誤標。
+        """
+        for frame in self.frames:
+            frame.wrap_x = enabled
+        self.canvas.set_wrap_x(enabled)
+        self.list_panel.set_frames(self.frames)
+        if 0 <= self.index < len(self.frames):
+            self.list_panel.set_current(self.index)
+        self._refresh_status()
+
     def _refresh_status(self) -> None:
         if not (0 <= self.index < len(self.frames)):
             self.lbl_frame.setText("未開啟資料")
-            for label in (self.lbl_boxes, self.lbl_state, self.lbl_zoom, self.lbl_pos):
+            for label in (self.lbl_boxes, self.lbl_state, self.lbl_wrap,
+                          self.lbl_zoom, self.lbl_pos):
                 label.setText("")
             return
         frame = self.frames[self.index]
         self.lbl_frame.setText(f"{self.index + 1}/{len(self.frames)}   seq={frame.seq}")
         self.lbl_boxes.setText(f"  框 {len(frame.dets)}  待補 {frame.pending_count}")
         self.lbl_state.setText("  未存 *" if frame.dirty else "  已存")
+        self.lbl_wrap.setText("  ERP 環景" if frame.wrap_x else "")
         self.lbl_zoom.setText(f"  zoom {self.canvas.tf.zoom * 100:.0f}%")
