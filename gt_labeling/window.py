@@ -233,13 +233,33 @@ class MainWindow(QMainWindow):
             "跳到上一個出現該 track 的框(Shift+F3,或在搜尋欄按 Shift+Enter)")
         self.act_find_prev.triggered.connect(lambda: self._find_next(-1))
 
+        menu_file = self.menuBar().addMenu("檔案")
+        menu_file.addAction(self.act_open)
+        menu_file.addAction(self.act_save)
+
+        menu_edit = self.menuBar().addMenu("編輯")
+        menu_edit.addAction(self.act_undo)
+        menu_edit.addAction(self.act_redo)
+        menu_edit.addSeparator()
+        menu_edit.addAction(self.act_delete)
+        menu_edit.addAction(self.act_interp)
+        menu_edit.addAction(self.act_remap)
+        menu_edit.addAction(self.act_bulk_undo)
+
+        menu_view = self.menuBar().addMenu("檢視")
+        menu_view.addAction(self.act_fit)
+
+        # 進了選單還是要 addAction:快捷鍵綁在 QAction 本身,不靠選單成立,
+        # 而導覽動作(上一張 / 下一張)兩處都不擺,少了這裡就整組失效。
+        # 它們不需要按鈕——入口是鍵盤與畫布,擺出來只是佔位。
         for action in (
-            self.act_open, self.act_prev, self.act_next, self.act_save,
-            self.act_undo, self.act_redo, self.act_delete, self.act_fit,
-            self.act_interp, self.act_remap, self.act_bulk_undo, self.act_autosave,
+            self.act_open, self.act_save, self.act_undo, self.act_redo,
+            self.act_delete, self.act_fit, self.act_interp, self.act_remap,
+            self.act_bulk_undo, self.act_autosave, self.act_prev, self.act_next,
         ):
             self.addAction(action)
-            toolbar.addAction(action)
+
+        toolbar.addAction(self.act_autosave)
 
         # Home / End 綁在畫布而非整個視窗:視窗層的快捷鍵會連 jump_edit 打字時
         # 一起攔掉,那裡的 Home / End 必須留給行首 / 行尾。幀清單有焦點時
@@ -247,7 +267,6 @@ class MainWindow(QMainWindow):
         for action in (self.act_first, self.act_last):
             action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
             self.canvas.addAction(action)
-        toolbar.insertActions(self.act_save, [self.act_first, self.act_last])
 
         # 三個都得 addAction 快捷鍵才生效,但只有「找」會進 toolbar:搜尋欄本體就在
         # 下面,再擺兩顆按鈕會把工具列塞爆。Ctrl+F / Shift+F3 的入口寫在右下角說明。
