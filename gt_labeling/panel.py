@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIntValidator
+from PyQt6.QtGui import QAction, QColor, QFont, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -41,6 +42,7 @@ class FrameListPanel(QWidget):
     """每幀一列:seq、框數、待補標記(ID / PPE)、id 重疊標記(DUP)、未存標記(*)。"""
 
     rowSelected = pyqtSignal(int)
+    deleteRequested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -48,7 +50,22 @@ class FrameListPanel(QWidget):
         self.list = QListWidget(self)
         self.list.setFont(_mono_font())
         self.list.setUniformItemSizes(True)
+        # 可多選:Shift 拉一段連續的幀、Ctrl 加點零散的幀,用來圈出「這條軌跡從哪
+        # 到哪是錯的」。currentRow 仍然只有一列,所以「目前顯示哪一幀」的語意不變,
+        # 選取範圍是**額外**的資訊,只有 deleteRequested 會去讀它。
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.currentRowChanged.connect(self._on_row_changed)
+
+        # Delete 綁在清單上(WidgetShortcut),畫布上的 Delete 仍是「刪這一個框」:
+        # 同一顆鍵在兩處各做各的事,靠焦點在誰身上區分——人在清單裡拉範圍時,腦中
+        # 想的就是「刪掉這一段」,跑去畫布刪單框反而是意外。
+        delete = QAction("刪除選取幀內的整條軌跡", self.list)
+        delete.setShortcuts(
+            [QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)]
+        )
+        delete.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        delete.triggered.connect(lambda: self.deleteRequested.emit())
+        self.list.addAction(delete)
 
         self.summary = QLabel("—", self)
         self.summary.setWordWrap(True)
@@ -105,7 +122,14 @@ class FrameListPanel(QWidget):
             f"未存 {dirty_frames} 幀"
         )
 
+    def selected_rows(self) -> list[int]:
+        """目前反白的所有列(升冪)。只有一列時就是當前幀本身。"""
+        return sorted(self.list.row(item) for item in self.list.selectedItems())
+
     def set_current(self, index: int) -> None:
+        # currentRow 已經對就直接返回,不只是省事:setCurrentRow 預設會清掉其他選取,
+        # 而使用者用 Shift 拉範圍時每一步都會走到這裡(rowSelected -> 切幀 -> 回頭
+        # 同步),真的設下去會把剛拉好的範圍當場清空。
         if self.list.currentRow() == index:
             return
         self._syncing = True

@@ -20,6 +20,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -320,6 +321,56 @@ def plan_remap(frames: list[FrameLabel], label: str, old_id: int, new_id: int) -
         result.targets.extend((index, d) for d in hits)
         if any(d.label == label and d.track_id == new_id for d in frame.dets):
             result.conflicts.append(frame.seq)
+    return result
+
+
+@dataclass(slots=True)
+class TrackDelete:
+    """一次「刪掉一條軌跡的某一段」的計畫:要刪哪些框、範圍外還留著幾個。"""
+
+    targets: list[tuple[int, Det]] = field(default_factory=list)  # (frame index, 要刪的框)
+    outside: int = 0  # 同一條軌跡在選取範圍**外**的框數,不刪
+
+    @property
+    def frame_indexes(self) -> list[int]:
+        return sorted({i for i, _ in self.targets})
+
+    @property
+    def box_count(self) -> int:
+        return len(self.targets)
+
+
+def plan_track_delete(
+    frames: list[FrameLabel], label: str, track_id: int, frame_indexes: Iterable[int]
+) -> TrackDelete:
+    """算出把 ``(label, track_id)`` 在指定的那幾幀裡刪光會動到哪些框。
+
+    刪「一段」而不是整條:tracker 常在目標離場後還吐一串幽靈框,或把某一段誤配到
+    別的目標身上——要清掉的是那一段,軌跡其餘部分是對的。逐幀點框再按 Delete 在
+    長序列上慢到不可行,所以範圍由幀清單的多選決定,一次刪完。
+
+    軌跡身分是 ``(label, track_id)``,理由同 :func:`interpolate_missing`:只認
+    track_id 的話,刪 person#7 會連同幀的 drone#7 一起刪掉,而下游把 person /
+    drone 拆成兩個清單各自評估,這種誤刪不會有人報錯,只會靜默少算。
+
+    ``outside`` 回報「這條軌跡在範圍外還剩幾個框」,讓確認對話框講得出「刪的是一段
+    還是整條」——這兩件事的後果差很多,而人在清單上拉範圍時很難確定自己圈到哪裡。
+
+    同一幀有多個同號框(``has_duplicate_track``)時**每個都列進來**:重疊本來就是
+    要清掉的狀況,只刪一個會留下另一個,人還以為刪乾淨了。
+
+    只算不改;套用交給呼叫方,才能在中間插入確認與快照(同 :func:`plan_remap`)。
+    """
+    wanted = set(frame_indexes)
+    result = TrackDelete()
+    for index, frame in enumerate(frames):
+        hits = [d for d in frame.dets if d.label == label and d.track_id == track_id]
+        if not hits:
+            continue
+        if index in wanted:
+            result.targets.extend((index, d) for d in hits)
+        else:
+            result.outside += len(hits)
     return result
 
 

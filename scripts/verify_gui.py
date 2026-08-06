@@ -15,9 +15,10 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt6.QtCore import QPoint, QSettings, Qt
+from PyQt6.QtCore import QPoint, QSettings, Qt, QTimer
+from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QAbstractItemView, QApplication
 
 from gt_labeling.canvas import COLOR_DRONE, det_color
 from gt_labeling.model import (
@@ -27,6 +28,7 @@ from gt_labeling.model import (
     interpolate_missing,
     load_frame,
     plan_remap,
+    plan_track_delete,
 )
 from gt_labeling.window import MainWindow
 
@@ -82,6 +84,24 @@ def find_empty_spot(canvas, span: int = 60) -> QPoint | None:
                 continue
             return QPoint(int(x), int(y))
     return None
+
+
+def catch_modal(store: list[tuple[str, str]]) -> None:
+    """排一個 timer,把接下來彈出的 modal 對話框內容記下來再關掉。
+
+    offscreen 測試不能讓 ``QMessageBox.exec()`` 卡死,但又要驗它真的彈了、內容對不對。
+    ``singleShot(0)`` 排的 timer 會在對話框自己的 event loop 第一輪跑到;若對話框根本
+    沒彈,timer 只是空跑一次,不會卡住也不會誤報。
+    """
+
+    def grab() -> None:
+        dialog = QApplication.activeModalWidget()
+        if dialog is None:
+            return
+        store.append((dialog.windowTitle(), getattr(dialog, "text", lambda: "")()))
+        dialog.accept()
+
+    QTimer.singleShot(0, grab)
 
 
 def drag(canvas, start: QPoint, end: QPoint, steps: int = 6) -> None:
@@ -564,6 +584,146 @@ def main() -> int:
         ]
         check(not any(window.frames[i].dirty for i in tail),
               "還原後這幾幀回到已存狀態")
+
+        section("幀清單多選 + Delete:刪掉選取範圍內的整條 track")
+        frame_list = window.list_panel.list
+        check(frame_list.selectionMode() ==
+              QAbstractItemView.SelectionMode.ExtendedSelection,
+              "幀清單可多選(Shift 拉連續 / Ctrl 加點零散)")
+        check(any(QKeySequence(Qt.Key.Key_Delete) in action.shortcuts()
+                  for action in frame_list.actions()),
+              "Delete 綁在幀清單本身,不搶畫布的「刪掉這一個框」")
+
+        # 前置不足的兩條路都要說明原因而非靜默不動:入口只有一顆 Delete 鍵。
+        frame_list.clearSelection()
+        counts_before = [len(f.dets) for f in window.frames]
+        window._delete_track_range()
+        app.processEvents()
+        check([len(f.dets) for f in window.frames] == counts_before,
+              "沒選任何幀時按 Delete 不動資料")
+        check("幀清單" in window.statusBar().currentMessage(),
+              f"且有說明原因:{window.statusBar().currentMessage()!r}")
+
+        window._last_track = None
+        frame_list.setCurrentRow(rows[0])
+        window._delete_track_range()
+        app.processEvents()
+        check([len(f.dets) for f in window.frames] == counts_before,
+              "沒點過任何框時按 Delete 不動資料")
+        check("還沒點過" in window.statusBar().currentMessage(),
+              f"且有說明原因:{window.statusBar().currentMessage()!r}")
+
+        # 黏著記憶:這功能的操作順序(點框 → 到清單圈範圍)中間必然切過幀,而切幀
+        # 會清掉畫布選取 —— 所以「要刪哪一條」非記不可,不能等到按下 Delete 才問。
+        window._goto(rows[0])
+        canvas.select(next(k for k, d in enumerate(window.frames[rows[0]].dets)
+                           if on_track(d)))
+        app.processEvents()
+        check(window._last_track == (probe_label, probe_tid),
+              f"點框後記住 {probe_label} #{probe_tid}(實際 {window._last_track})")
+        window._goto(rows[-1])
+        app.processEvents()
+        check(canvas.selected_det is None, "切幀後畫布選取被清掉(所以問不到目標)")
+        check(window._last_track == (probe_label, probe_tid), "但記住的軌跡跨幀存活")
+
+        # 真的用 Shift+↓ 拉範圍,不是直接呼叫 API 設選取 —— 要驗的正是這條路。
+        del_lo, del_hi = rows[0], rows[len(rows) // 2 - 1]
+        frame_list.setFocus()
+        frame_list.setCurrentRow(del_lo)
+        app.processEvents()
+        for _ in range(del_hi - del_lo):
+            QTest.keyClick(frame_list, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+        app.processEvents()
+        check(window.list_panel.selected_rows() == list(range(del_lo, del_hi + 1)),
+              f"Shift+↓ 拉出連續範圍 {del_lo}..{del_hi}"
+              f"(實際 {window.list_panel.selected_rows()[:3]}… 共 "
+              f"{len(window.list_panel.selected_rows())} 列)")
+        check(window.index == del_hi, "拉範圍時當前幀跟著走到範圍末端(語意不變)")
+
+        doomed_rows = [i for i in rows if del_lo <= i <= del_hi]
+        kept_rows = [i for i in rows if i > del_hi]
+        check(bool(doomed_rows) and bool(kept_rows),
+              f"範圍內 {len(doomed_rows)} 幀要刪、範圍外 {len(kept_rows)} 幀要留")
+
+        # 人在清單裡操作時 _goto 不搶焦點(搶了 ↑↓ 與 Delete 就全落空),所以焦點會
+        # 一直留在清單上。工具列那些 window 層快捷鍵必須照樣到得了 —— 真實環境的
+        # 按鍵一律送到焦點 widget,這裡就照那樣送。
+        check(frame_list.hasFocus(), "拉完範圍焦點仍在幀清單(↑↓ 與 Delete 才有效)")
+        QTest.keyClick(frame_list, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        app.processEvents()
+        check(window.find_edit.hasFocus(), "焦點在幀清單時 Ctrl+F 照樣聚焦搜尋欄")
+        window.find_edit.clear()
+        window.find_kind.setCurrentIndex(0)
+        frame_list.setFocus()
+
+        # 同號但不同 label 的框:認軌是 (label, track_id),它絕對不能被一起刪掉。
+        other_label = "drone" if probe_label == "person" else "person"
+        ghost_row = doomed_rows[0]
+        ghost = Det(label=other_label, track_id=probe_tid, ppe=None,
+                    bbox=[0.90, 0.10, 0.95, 0.15])
+        window.frames[ghost_row].dets.append(ghost)
+
+        plan = plan_track_delete(window.frames, probe_label, probe_tid,
+                                 window.list_panel.selected_rows())
+        check(plan.frame_indexes == doomed_rows,
+              f"算出要刪 {len(doomed_rows)} 幀(實際 {len(plan.frame_indexes)})")
+        outside = sum(1 for i in kept_rows for d in window.frames[i].dets if on_track(d))
+        check(plan.outside == outside,
+              f"回報範圍外還有 {outside} 個框會保留(實際 {plan.outside})")
+        check(all(d is not ghost for _, d in plan.targets),
+              f"同號的 {other_label} #{probe_tid} 不在刪除清單")
+
+        # catch_modal 是 accept() 關掉對話框,不是點下「確定」按鈕 —— QMessageBox
+        # 這樣關回傳的不是 StandardButton.Ok,所以這一輪等同取消,資料必須原封不動。
+        counts_now = [len(f.dets) for f in window.frames]
+        asked: list[tuple[str, str]] = []
+        catch_modal(asked)
+        QTest.keyClick(frame_list, Qt.Key.Key_Delete)
+        app.processEvents()
+        check(len(asked) == 1 and asked[0][0] == "刪除軌跡片段",
+              f"按 Delete 彈出確認視窗(實際 {[t for t, _ in asked]})")
+        # offscreen 平台關掉 modal 後不會把 active window 還給主視窗(activeWindow()
+        # 變 None),而焦點與快捷鍵都只在 active window 裡成立 —— 不補這一下,後面
+        # 每一段的按鍵測試都會靜默落空。這是測試環境的還原,不是產品行為。
+        window.activateWindow()
+        app.processEvents()
+        if asked:
+            check(f"{probe_label} #{probe_tid}" in asked[0][1]
+                  and f"{plan.box_count} 個框" in asked[0][1],
+                  f"視窗寫明刪的是誰、幾個框:{asked[0][1].splitlines()[0]!r}")
+            check(f"範圍外還有 {outside} 個框" in asked[0][1],
+                  "視窗寫明範圍外還留著多少(剩 0 代表整條消失,後果差很多)")
+        check([len(f.dets) for f in window.frames] == counts_now,
+              "沒按下「確定」就關掉對話框時不動資料")
+
+        window.apply_track_delete(plan, probe_label, probe_tid)
+        app.processEvents()
+        check(not any(on_track(d) for i in doomed_rows for d in window.frames[i].dets),
+              f"選取範圍內的 {probe_label} #{probe_tid} 全部消失")
+        check(all(any(on_track(d) for d in window.frames[i].dets) for i in kept_rows),
+              f"範圍外的 {len(kept_rows)} 幀原封不動")
+        check(any(d is ghost for d in window.frames[ghost_row].dets),
+              f"同號的 {other_label} #{probe_tid} 沒被波及(認軌是 (label, track_id))")
+        check(window.frames[ghost_row].dirty, "刪完該幀標記未存")
+        check(window._last_track == (probe_label, probe_tid),
+              "刪完仍記著同一條軌跡(幽靈框常分好幾段,要能接著刪下一段)")
+        check(canvas.hasFocus(), "刪完焦點交還畫布(接著就是看畫面確認,A / D 也還能翻)")
+
+        window._undo_last_bulk()
+        app.processEvents()
+        check(all(any(on_track(d) for d in window.frames[i].dets) for i in doomed_rows),
+              "Ctrl+Shift+I 整組復原,刪掉的框全部回來")
+
+        # 還原成磁碟上的樣子:拿掉造出來的框。復原是用 clone 寫回去的,原本那顆
+        # ghost 物件已經不在 dets 裡,只能用值比對。
+        window.frames[ghost_row].dets[:] = [
+            d for d in window.frames[ghost_row].dets
+            if not (d.label == other_label and d.track_id == probe_tid
+                    and d.bbox == [0.90, 0.10, 0.95, 0.15])
+        ]
+        check(not any(window.frames[i].dirty for i in doomed_rows),
+              "還原後這幾幀回到已存狀態")
+        frame_list.clearSelection()
 
         section("清單待補標記")
         # 樣本資料不保證含 null,自己在記憶體造一個待補狀態再還原,驗證與資料內容無關。

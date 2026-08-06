@@ -28,11 +28,13 @@ from .model import (
     Det,
     FrameLabel,
     Remap,
+    TrackDelete,
     UndoStack,
     find_track,
     interpolate_missing,
     load_frame,
     plan_remap,
+    plan_track_delete,
 )
 from .panel import (
     DEFAULT_MAX_GAP,
@@ -56,10 +58,12 @@ A / ← 上一張    D / → 下一張    Home / End 首幀 / 末幀
 左鍵拖空白 新增框(套用右上「新框預設」)
   補錨點前先點該 track 任一框,再選「沿用 #id」
 左鍵點框 選取,拖角邊改大小,拖框內移動
-Delete 刪除選取框    F 還原檢視
+Delete 刪除選取框(焦點在畫布)    F 還原檢視
 Ctrl+S 存檔   Ctrl+Z 復原   Ctrl+Shift+Z 重做
 Ctrl+I 補框(選取框的 track)   Ctrl+R 改 id(整條軌跡換號)
-Ctrl+Shift+I 復原上次批次(補框 / 改 id)
+左側幀清單 Shift / Ctrl 多選 + Delete 刪掉選取幀內的整條 track
+  先點該 track 任一框(記住是誰),再去清單圈範圍
+Ctrl+Shift+I 復原上次批次(補框 / 改 id / 刪軌跡)
 Ctrl+F 找 track(F3 下一個 / Shift+F3 上一個)
   搜尋欄內:Enter 下一個 / Shift+Enter 上一個 / Esc 回畫布"""
 
@@ -80,6 +84,8 @@ class MainWindow(QMainWindow):
         # 後做的那次會蓋掉前一次的還原點,所以訊息一律講清楚復原的是哪一次操作。
         self._last_bulk: dict[int, list[Det]] = {}
         self._last_bulk_what = ""
+        # 最後點過的框屬於哪一條軌跡。做成黏著值的理由見 _remember_track。
+        self._last_track: tuple[str, int] | None = None
 
         self.store = ImageStore(cache_size, self)
         self.store.ready.connect(self._on_image_ready)
@@ -140,6 +146,7 @@ class MainWindow(QMainWindow):
         self.canvas.navigateRequested.connect(self._navigate)
         self.canvas.hoverMoved.connect(self._on_hover)
         self.list_panel.rowSelected.connect(self._goto)
+        self.list_panel.deleteRequested.connect(self._delete_track_range)
         self.new_panel.changed.connect(self._on_new_default_changed)
         self.interp_panel.toggled.connect(lambda _: self._refresh_actions())
         self.det_panel.fieldChanged.connect(self._on_field_changed)
@@ -414,6 +421,8 @@ class MainWindow(QMainWindow):
         # 快照裡存的是舊資料集的 frame index,換資料夾後必須丟掉。
         self._last_bulk = {}
         self._last_bulk_what = ""
+        # 記住的軌跡同理:新資料集的同一個號碼是完全不同的目標,留著只會誤刪。
+        self._last_track = None
         self.undo_stacks = []
         for frame in frames:
             stack = UndoStack(UNDO_LIMIT)
@@ -449,7 +458,11 @@ class MainWindow(QMainWindow):
         self._prefetch_around(index)
         self._refresh_actions()
         self._refresh_status()
-        self.canvas.setFocus()
+        # 焦點還給畫布,讓點完清單 / 跳完 seq 就能直接用 A、D 翻頁——但人正在幀清單
+        # 裡操作時不能搶:選一列就切一次幀,搶走焦點會讓接下來的 ↑↓ 與 Delete
+        # (刪選取幀內的整條軌跡)全部落空,而拉範圍本來就是連續好幾次選取。
+        if not self.list_panel.list.hasFocus():
+            self.canvas.setFocus()
 
     def _navigate(self, delta: int) -> None:
         if self.frames:
@@ -851,12 +864,110 @@ class MainWindow(QMainWindow):
         selected = self.canvas.selected_det
         if selected is not None and selected.track_id == new_id:
             self.new_panel.set_follow_candidate(new_id)
+        # 記住的軌跡剛剛被換掉號碼,舊號在資料集裡已經不存在了,跟著改成新號;
+        # 不改的話,接著在幀清單按 Delete 只會得到一句「找不到這條軌跡」。
+        if self._last_track == (label, old_id):
+            self._last_track = (label, new_id)
 
         seqs = [self.frames[i].seq for i in touched]
         self.statusBar().showMessage(
             f"已把 {label} #{old_id} 改成 #{new_id}({len(touched)} 幀 / "
             f"{plan.box_count} 框,seq {min(seqs)}..{max(seqs)}),"
             f"Ctrl+Shift+I 可整組復原",
+            6000,
+        )
+
+    # --------------------------------------------------- 刪掉一條軌跡的某一段
+
+    def _remember_track(self) -> None:
+        """記住最後點過的框屬於哪一條軌跡。
+
+        黏著值而非即時讀 ``canvas.selected_det``:切幀時 ``set_frame`` 會清掉畫布
+        選取,而這功能的操作順序正是「點框 → 到左邊清單圈一段幀 → Delete」,中間
+        必然切過幀,真要現場問就永遠問不到。理由同 ``NewDetPanel`` 的「沿用 #id」。
+
+        沒有 track_id 的框不覆蓋既有記憶:那種框連自己是哪一條都還沒定,拿它當
+        刪除目標沒有意義,反而會把人剛選好的目標洗掉。
+        """
+        det = self.canvas.selected_det
+        if det is not None and det.track_id is not None:
+            self._last_track = (det.label, det.track_id)
+
+    def _delete_track_range(self) -> None:
+        """幀清單按 Delete:把記住的那條軌跡,在選取的那幾幀裡整段刪掉。
+
+        用途是清幽靈框——目標離場後 tracker 還吐一串,或某一段被誤配到別的目標。
+        這種錯誤總是「一整段」,逐幀點框刪在幾百幀的序列上慢到沒人會做。
+
+        前置不足時一律說明原因(同 ``_interpolate`` / ``_remap_track``):入口只有
+        一顆 Delete 鍵,靜默失敗會讓人以為程式壞了。
+        """
+        if not self.frames:
+            return
+        rows = self.list_panel.selected_rows()
+        if not rows:
+            self.statusBar().showMessage(
+                "先在左邊幀清單選要清掉的那幾幀(Shift 拉連續 / Ctrl 加點零散的)", 6000)
+            return
+        if self._last_track is None:
+            self.statusBar().showMessage(
+                "還沒點過任何有 track_id 的框:先在畫布點一個,決定要刪哪一條 track", 6000)
+            return
+
+        label, track_id = self._last_track
+        plan = plan_track_delete(self.frames, label, track_id, rows)
+        seqs = [self.frames[i].seq for i in rows]
+        span = f"seq {min(seqs)}..{max(seqs)}"
+        if not plan.targets:
+            self.statusBar().showMessage(
+                f"選取的 {len(rows)} 幀({span})裡沒有 {label} #{track_id} 的框", 6000)
+            return
+
+        # 「範圍外還剩幾個」是刪之前最該知道的事:剩 0 代表這條軌跡會整條消失,
+        # 而人在清單上拉範圍時很難確定自己到底圈到哪裡。
+        rest = (f"範圍外還有 {plan.outside} 個框會保留。" if plan.outside
+                else f"⚠ 範圍已涵蓋整條軌跡,{label} #{track_id} 會從整份資料集消失。")
+        answer = QMessageBox.question(
+            self,
+            "刪除軌跡片段",
+            f"{label} #{track_id}\n"
+            f"選取 {len(rows)} 幀({span}),其中 {len(plan.frame_indexes)} 幀命中,"
+            f"共 {plan.box_count} 個框要刪。\n\n{rest}\n\n要刪嗎?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if answer == QMessageBox.StandardButton.Ok:
+            self.apply_track_delete(plan, label, track_id)
+
+    def apply_track_delete(self, plan: TrackDelete, label: str, track_id: int) -> None:
+        """套用一份刪除計畫。與 ``_delete_track_range`` 的對話框分開,方便直接驗收。"""
+        touched = plan.frame_indexes
+        if not touched:
+            return
+        self._snapshot_bulk(touched, f"刪除 {label} #{track_id}")
+        # 用物件 identity 過濾整份 dets,而不是逐個 index 刪:index 會隨著刪除位移,
+        # 而值比對分不出同一幀裡兩個欄位完全相同的重疊框(清單上的 DUP)——那正是
+        # 這功能要清掉的狀況之一,漏掉一個等於白刪。
+        doomed = {id(det) for _, det in plan.targets}
+        for index in touched:
+            dets = self.frames[index].dets
+            dets[:] = [d for d in dets if id(d) not in doomed]
+            self.undo_stacks[index].commit(self.frames[index].snapshot())
+
+        self._after_bulk_change(touched)
+        # 焦點交還畫布:剛刪掉一整段,下一步一定是看畫面確認刪對了沒。順帶把
+        # A / D 翻頁還原回來——人在幀清單裡操作時 _goto 刻意不搶焦點,而清單只吃
+        # ↑↓,不放回去的話得先點一下畫布才能繼續用習慣的鍵翻幀。
+        self.canvas.setFocus()
+        # 記憶顯式設回剛刪的那條:刪完後畫布的選取多半被迫改指隔壁的框(原本選的
+        # 已經不在了),記憶跟著飄走的話,下一段就會刪到不相干的軌跡。幽靈框常分成
+        # 好幾段,「刪完一段接著刪下一段」是主要用法,不能每段都要人重新點一次。
+        self._last_track = (label, track_id)
+
+        seqs = [self.frames[i].seq for i in touched]
+        self.statusBar().showMessage(
+            f"已刪掉 {label} #{track_id} 的 {plan.box_count} 個框"
+            f"({len(touched)} 幀,seq {min(seqs)}..{max(seqs)}),Ctrl+Shift+I 可整組復原",
             6000,
         )
 
@@ -899,6 +1010,7 @@ class MainWindow(QMainWindow):
         self.det_panel.set_det(selected, frame.size if frame is not None else None)
         if selected is not None:
             self.new_panel.set_follow_candidate(selected.track_id)
+        self._remember_track()
         # 走統一刷新而非單獨設某個 action:選取狀態會影響不只一個動作,
         # 逐一手動更新遲早漏掉(「補框」就是這樣一直停在停用狀態)。
         self._refresh_actions()
@@ -937,6 +1049,9 @@ class MainWindow(QMainWindow):
         self.list_panel.refresh_row(self.index, frame)
         self.list_panel.refresh_summary(self.frames)
         self.det_panel.set_det(self.canvas.selected_det, frame.size)
+        # 在右側面板改掉選取框的 label / track_id 不會發 selectionChanged,
+        # 記憶得在這裡跟上,否則「刪這條」刪的還是改號前的舊軌跡。
+        self._remember_track()
         self._refresh_actions()
         self._refresh_status()
 
