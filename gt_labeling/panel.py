@@ -12,10 +12,12 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QRadioButton,
     QSpinBox,
     QVBoxLayout,
@@ -75,6 +77,64 @@ class FrameListPanel(QWidget):
         layout.addWidget(QLabel("幀清單  seq  框數  待補  重疊  未存"))
         layout.addWidget(self.list, 1)
         layout.addWidget(self.summary)
+        layout.addWidget(self._build_target_box())
+
+    def _build_target_box(self) -> QWidget:
+        """「要刪哪一條」的顯性入口。
+
+        擺在清單正下方而不是靠隱性記憶,是因為「刪哪一條 × 哪些幀」是兩個獨立
+        選擇,而幀已經有很好的 UI(清單多選),軌跡卻沒有——只靠「最後點過的框」
+        的話,人在按下 Delete 之前完全看不到目標是誰。
+
+        更要命的是順序:選好範圍後想改目標,得跑去畫布點框,而**點回清單就會把
+        剛拉好的範圍清光**(ExtendedSelection 的標準行為,實測點一列只剩那一列)。
+        所以目標必須能就地修改,不必離開清單;按鈕也必須存在,因為改完號碼焦點
+        在輸入框上,那時 Delete 鍵不會落在清單身上。
+        """
+        self.target_kind = QComboBox(self)
+        self.target_kind.addItems(LABELS)
+        self.target_kind.setFixedWidth(80)
+
+        self.target_edit = QLineEdit(self)
+        self.target_edit.setValidator(QIntValidator(0, 2_000_000_000, self))
+        self.target_edit.setPlaceholderText("track_id")
+        # Enter 等同按下按鈕:改完號碼最自然的下一個動作就是執行。
+        self.target_edit.returnPressed.connect(lambda: self.deleteRequested.emit())
+
+        self.delete_button = QPushButton("刪掉選取幀內的這條軌跡", self)
+        self.delete_button.setToolTip(
+            "把上面指定的軌跡,在幀清單選取的那幾幀裡整段刪掉。\n"
+            "點畫布上的框會自動填進來,也可以直接改號碼。")
+        self.delete_button.clicked.connect(lambda: self.deleteRequested.emit())
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel("目標", self))
+        row.addWidget(self.target_kind)
+        row.addWidget(self.target_edit, 1)
+
+        box = QVBoxLayout()
+        box.addLayout(row)
+        box.addWidget(self.delete_button)
+
+        group = QGroupBox("Delete 刪除軌跡", self)
+        group.setLayout(box)
+        return group
+
+    def set_delete_target(self, label: str, track_id: int) -> None:
+        """把目標設成某條軌跡(點框時由主視窗餵進來)。"""
+        index = self.target_kind.findText(label)
+        if index >= 0:
+            self.target_kind.setCurrentIndex(index)
+        self.target_edit.setText(str(track_id))
+
+    def clear_delete_target(self) -> None:
+        self.target_edit.clear()
+
+    def delete_target(self) -> tuple[str, int] | None:
+        """目前指定的軌跡;號碼空白代表還沒指定。"""
+        text = self.target_edit.text().strip()
+        return (self.target_kind.currentText(), int(text)) if text else None
 
     def set_frames(self, frames: list[FrameLabel]) -> None:
         self._syncing = True

@@ -623,27 +623,39 @@ def main() -> int:
         check("幀清單" in window.statusBar().currentMessage(),
               f"且有說明原因:{window.statusBar().currentMessage()!r}")
 
-        window._last_track = None
+        window.list_panel.clear_delete_target()
         frame_list.setCurrentRow(rows[0])
         window._delete_track_range()
         app.processEvents()
         check([len(f.dets) for f in window.frames] == counts_before,
-              "沒點過任何框時按 Delete 不動資料")
-        check("還沒點過" in window.statusBar().currentMessage(),
+              "沒指定要刪哪一條時不動資料")
+        check("先決定要刪哪一條" in window.statusBar().currentMessage(),
               f"且有說明原因:{window.statusBar().currentMessage()!r}")
+        check(window.list_panel.target_edit.hasFocus(),
+              "並把游標送到目標欄,人不必自己去找那一格在哪")
 
-        # 黏著記憶:這功能的操作順序(點框 → 到清單圈範圍)中間必然切過幀,而切幀
-        # 會清掉畫布選取 —— 所以「要刪哪一條」非記不可,不能等到按下 Delete 才問。
+        # 目標是畫面上看得到的那一格,不是藏在後面的影子狀態 —— 點框自動填進去。
         window._goto(rows[0])
         canvas.select(next(k for k, d in enumerate(window.frames[rows[0]].dets)
                            if on_track(d)))
         app.processEvents()
-        check(window._last_track == (probe_label, probe_tid),
-              f"點框後記住 {probe_label} #{probe_tid}(實際 {window._last_track})")
+        check(window.list_panel.delete_target() == (probe_label, probe_tid),
+              f"點框後目標填成 {probe_label} #{probe_tid}"
+              f"(實際 {window.list_panel.delete_target()})")
+        check(window.list_panel.target_edit.text() == str(probe_tid),
+              f"而且是寫在畫面上看得到的欄位裡:{window.list_panel.target_edit.text()!r}")
         window._goto(rows[-1])
         app.processEvents()
         check(canvas.selected_det is None, "切幀後畫布選取被清掉(所以問不到目標)")
-        check(window._last_track == (probe_label, probe_tid), "但記住的軌跡跨幀存活")
+        check(window.list_panel.delete_target() == (probe_label, probe_tid),
+              "但目標欄跨幀存活")
+
+        # 就地改號:選好範圍後想換目標,不必回畫布點框 —— 那條路會逼人重選範圍,
+        # 因為點回清單會把拉好的範圍清光(ExtendedSelection 的標準行為)。
+        window.list_panel.target_edit.setText("999999")
+        check(window.list_panel.delete_target() == (probe_label, 999999),
+              f"直接打號碼就換目標(實際 {window.list_panel.delete_target()})")
+        window.list_panel.set_delete_target(probe_label, probe_tid)
 
         # 真的用 Shift+↓ 拉範圍,不是直接呼叫 API 設選取 —— 要驗的正是這條路。
         # 拉幾列要設上限:每按一次就切一幀、跟著解一張 3840x1920 的 JPEG,而
@@ -729,14 +741,39 @@ def main() -> int:
         check(any(d is ghost for d in window.frames[ghost_row].dets),
               f"同號的 {other_label} #{probe_tid} 沒被波及(認軌是 (label, track_id))")
         check(window.frames[ghost_row].dirty, "刪完該幀標記未存")
-        check(window._last_track == (probe_label, probe_tid),
-              "刪完仍記著同一條軌跡(幽靈框常分好幾段,要能接著刪下一段)")
+        check(window.list_panel.delete_target() == (probe_label, probe_tid),
+              "刪完目標仍停在同一條(幽靈框常分好幾段,要能接著刪下一段)")
         check(canvas.hasFocus(), "刪完焦點交還畫布(接著就是看畫面確認,A / D 也還能翻)")
 
         window._undo_last_bulk()
         app.processEvents()
         check(all(any(on_track(d) for d in window.frames[i].dets) for i in doomed_rows),
               "Ctrl+Shift+I 整組復原,刪掉的框全部回來")
+
+        # 按鈕入口:焦點在目標輸入框上(剛改完號碼的實際狀態)時 Delete 鍵不會
+        # 落在清單身上,沒有按鈕就等於做不下去。這裡連 modal 都不攔,驗的是
+        # 「按下去真的走到同一條路」——會彈出確認視窗就代表接上了。
+        window.list_panel.target_edit.setFocus()
+        app.processEvents()
+        check(not frame_list.hasFocus(), "焦點在目標輸入框上(Delete 鍵此時到不了清單)")
+        pressed: list[tuple[str, str]] = []
+        catch_modal(pressed)
+        window.list_panel.delete_button.click()
+        app.processEvents()
+        check(len(pressed) == 1 and pressed[0][0] == "刪除軌跡片段",
+              f"按鈕照樣叫得出確認視窗(實際 {[t for t, _ in pressed]})")
+        window.activateWindow()
+        app.processEvents()
+
+        # 目標欄按 Enter 是第三個入口(改完號碼最自然的下一個動作)。
+        pressed.clear()
+        catch_modal(pressed)
+        window.list_panel.target_edit.returnPressed.emit()
+        app.processEvents()
+        check(len(pressed) == 1 and pressed[0][0] == "刪除軌跡片段",
+              f"目標欄按 Enter 也走同一條路(實際 {[t for t, _ in pressed]})")
+        window.activateWindow()
+        app.processEvents()
 
         # 還原成磁碟上的樣子:拿掉造出來的框。復原是用 clone 寫回去的,原本那顆
         # ghost 物件已經不在 dets 裡,只能用值比對。
