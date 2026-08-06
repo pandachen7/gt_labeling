@@ -606,6 +606,9 @@ def main() -> int:
             check("DUP" not in window.list_panel.list.item(dup_row).text(),
                   "沒有重疊的列不帶 DUP 標記")
 
+            # 摘要驗「比造假之前多一幀」,不驗絕對數字:資料集本身就可能帶著重疊
+            # (上游 tracker 的產物,不是壞資料),寫死數字換一份樣本就報假 FAIL。
+            dup_before = sum(1 for f in window.frames if f.has_duplicate_track)
             twin = Det(label=base.label, track_id=base.track_id, ppe=base.ppe,
                        bbox=[0.40, 0.40, 0.45, 0.45])
             dup_frame.dets.append(twin)
@@ -615,8 +618,9 @@ def main() -> int:
             check("DUP" in window.list_panel.list.item(dup_row).text(),
                   f"該列文字含 DUP 標記:{window.list_panel.list.item(dup_row).text()!r}")
             window.list_panel.refresh_summary(window.frames)
-            check("id 重疊 1 幀" in window.list_panel.summary.text(),
-                  f"摘要算進去:{window.list_panel.summary.text().replace(chr(10), ' | ')!r}")
+            check(f"id 重疊 {dup_before + 1} 幀" in window.list_panel.summary.text(),
+                  f"摘要多算一幀({dup_before} → {dup_before + 1}):"
+                  f"{window.list_panel.summary.text().replace(chr(10), ' | ')!r}")
 
             # 跨 label 同號是正常的(person#1 與 drone#1 是兩條軌跡),不該警示。
             twin.label = "drone" if base.label == "person" else "person"
