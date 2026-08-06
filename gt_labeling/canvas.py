@@ -233,22 +233,24 @@ class ImageCanvas(QWidget):
         return self._frame is not None and self._frame.wrap_x
 
     def _shifts(self) -> range:
-        """畫框/hit-test 要比 visible_shifts 多算左邊一圈。
+        """畫框/hit-test 要比 visible_shifts 左右各多算一圈。
 
         visible_shifts 答的是「哪幾圈的整張影像跟視窗有交集」,對影像本身是對的
-        (影像每圈就是恰好一整圈,不會溢出)。但 canonical_bbox(wrap=True) 允許框寬
-        達到一整圈,x2 可以來到 x1+1.0——框在自己那一圈裡本來就可能跨進下一圈的
-        地盤。等視窗剛好塞滿一圈(貼齊 fit 到寬度時的預設檢視,off_x=0、
-        span_x=視窗寬,極常見)時,那一圈的鄰圈跟影像是零面積相交,被
-        visible_shifts 正確排除;但框溢出的那一段換算回螢幕,剛好落在視窗可見的
-        左緣——只算「影像可見的圈」會漏掉它,框就測不到、也畫不到左緣那一段。
-        往右溢出永遠不會反過來影響右邊(canonical 只允許 x2>1,不允許 x1<0),所以
-        只需要往左多補一圈,不必兩邊都補。
+        (影像每圈就是恰好一整圈,不會溢出)。但框寬最多一整圈,而且**拖曳中**的框
+        (放開滑鼠、canonical_bbox 收斂之前)兩端都不夾:`_apply_move` / 新框的起點
+        終點在環景下完全不夾 x,`_apply_resize` 只保證寬度不超過一整圈,不保證
+        `x1>=0` 或 `x2<=1`。所以拖曳過程中 `x1` 可以是負的、`x2` 可以超過 1——不是
+        只有「已存檔的 canonical 框」那種只往右溢出的情形,溢出可能在兩邊各發生。
+        等視窗剛好塞滿一圈(貼齊 fit 到寬度時的預設檢視,off_x=0、span_x=視窗寬,
+        極常見)時,鄰圈跟影像是零面積相交,被 visible_shifts 正確排除;但框溢出
+        的那一段換算回螢幕,可能落在視窗左緣(x1<0 時)或右緣(x2>1 時)——只算
+        「影像可見的圈」兩邊都會漏,框在拖曳跨縫的那一刻就會在畫面上消失一段,
+        放開滑鼠 canonical 化才跳回來。所以兩端都要多補一圈。
         """
         shifts = self.tf.visible_shifts(float(self.width()))
         if not self.tf.wrap_x:
             return shifts
-        return range(shifts.start - 1, shifts.stop)
+        return range(shifts.start - 1, shifts.stop + 1)
 
     def _set_selection(self, index: int) -> None:
         index = index if index >= 0 else -1

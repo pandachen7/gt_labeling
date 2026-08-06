@@ -493,7 +493,13 @@ def test_transform_wrap() -> None:
 
 
 def test_canvas_wrap_geometry() -> None:
-    """畫布環繞的兩個關鍵幾何:框在每一圈的位置、hit-test 命中對側那一份。"""
+    """畫布環繞的關鍵幾何:框可能溢出的圈,不等於 visible_shifts 答得出來的圈。
+
+    分兩種框各驗一次,因為溢出的方向不同:canonical 框(已存檔、或還沒開始編輯)
+    只會往右溢(x2>1,x1 恆在 [0,1)),但拖曳中的框(放開滑鼠、canonical_bbox
+    收斂之前)兩端都不夾,x1 可以是負的。這兩種情形各自需要 visible_shifts 沒有
+    回傳的一圈,證明畫布不能只用 visible_shifts 本身來決定畫/測哪幾圈。
+    """
     section("環景畫布幾何")
     tf = ViewTransform()
     tf.set_image_size(3840, 1920)
@@ -511,14 +517,26 @@ def test_canvas_wrap_geometry() -> None:
     check(round(shifted.left(), 6) == -60.0 and round(shifted.right(), 6) == 10.0,
           f"前一圈落在 -60~10 {shifted.left()}~{shifted.right()}")
 
-    # 視窗寬 1600:x=5 這個點應該落在「前一圈」的框裡,主圈測不到
-    point_x = 5.0
-    hit_main = rect.left() <= point_x <= rect.right()
-    hit_prev = shifted.left() <= point_x <= shifted.right()
-    check(not hit_main and hit_prev,
-          "畫面最左邊的點命中的是前一圈的框,所以 hit-test 必須逐圈測")
-    check(-1 in tf.visible_shifts(1600.0) or 0 in tf.visible_shifts(1600.0),
-          f"visible_shifts 有涵蓋這些圈 {list(tf.visible_shifts(1600.0))}")
+    # 1) canonical 跨縫框需要一個 visible_shifts 不會回傳的圈
+    #    (影像不會溢出自己那一圈,框會——這是 _shifts() 要多包兩圈的理由)
+    span = tf.span_x
+    view_w = span                      # 影像剛好填滿視窗:visible_shifts 只回 [0]
+    shifts = list(tf.visible_shifts(view_w))
+    check(shifts == [0], f"影像填滿視窗時只有一圈與視窗相交 {shifts}")
+    seam_box = [0.97, 0.5, 1.02, 0.7]  # canonical 跨縫框
+    wrapped = tf.n2v_rect(seam_box).translated(-1 * span, 0.0)
+    check(wrapped.left() < 0.0 < wrapped.right(),
+          f"它繞回來的那一段跨過畫面左緣 {wrapped.left()}~{wrapped.right()}")
+    check(-1 not in shifts,
+          "而 -1 圈不在 visible_shifts 裡 —— 所以繪製與 hit-test 不能只用它")
+
+    # 2) 拖曳中的框 x1 可以為負,繞回來的那一段落在高端那一圈
+    mid_drag = [-0.394, 0.30, 0.106, 0.45]
+    high = tf.n2v_rect(mid_drag).translated(1 * span, 0.0)
+    check(high.left() < view_w < high.right() or 0.0 < high.left() < view_w,
+          f"拖曳中的框在 +1 圈仍有一段在視窗內 {high.left()}~{high.right()}")
+    check(max(shifts) + 1 not in shifts,
+          "而高端那一圈也不在 visible_shifts 裡 —— 兩端都要多包一圈")
 
 
 def main() -> int:
