@@ -84,19 +84,20 @@ uv run --project D:\ws\gt_labeling gt-labeling <root> --band 0.5 0.9
 
 ### 鍵盤
 
-| 快捷鍵                    | 動作                         |
-| ------------------------- | ---------------------------- |
-| `A` / `←` / `PageUp`      | 上一張                       |
-| `D` / `→` / `PageDown`    | 下一張                       |
-| `Delete` / `Backspace`    | 刪除選取的框                 |
-| `F`                       | 還原檢視(fit)                |
-| `Esc`                     | 取消進行中的拖曳             |
-| `Ctrl+O`                  | 開資料夾                     |
-| `Ctrl+S`                  | 存檔                         |
-| `Ctrl+Z`                  | 復原                         |
-| `Ctrl+Shift+Z` / `Ctrl+Y` | 重做                         |
-| `Ctrl+I`                  | 內插補框(選取框所屬的 track) |
-| `Ctrl+Shift+I`            | 整組復原上一次補框           |
+| 快捷鍵                    | 動作                             |
+| ------------------------- | -------------------------------- |
+| `A` / `←` / `PageUp`      | 上一張                           |
+| `D` / `→` / `PageDown`    | 下一張                           |
+| `Delete` / `Backspace`    | 刪除選取的框                     |
+| `F`                       | 還原檢視(fit)                    |
+| `Esc`                     | 取消進行中的拖曳                 |
+| `Ctrl+O`                  | 開資料夾                         |
+| `Ctrl+S`                  | 存檔                             |
+| `Ctrl+Z`                  | 復原                             |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | 重做                             |
+| `Ctrl+I`                  | 內插補框(選取框所屬的 track)     |
+| `Ctrl+R`                  | 改 id(選取框所屬 track 全域換號) |
+| `Ctrl+Shift+I`            | 整組復原上一次批次(補框 / 改 id) |
 
 ### 滑鼠
 
@@ -111,11 +112,11 @@ uv run --project D:\ws\gt_labeling gt-labeling <root> --band 0.5 0.9
 
 ### 框的顏色
 
-| 顏色 | 意義               |
-| ---- | ------------------ |
-| 綠   | person, ppe=ok     |
-| 橘   | person, ppe=ng     |
-| 紅   | drone              |
+| 顏色 | 意義           |
+| ---- | -------------- |
+| 綠   | person, ppe=ok |
+| 橘   | person, ppe=ng |
+| 紅   | drone          |
 
 ## 功能
 
@@ -141,7 +142,21 @@ uv run --project D:\ws\gt_labeling gt-labeling <root> --band 0.5 0.9
 - 建議門檻:drone 20 幀、person 30 幀(預設 20)。
 - 權重用 `seq` 差而非清單位置差,抽樣不連續的資料集也不會算歪。
 - 被跳過的洞會在對話框列出,並說明該補哪裡。
-- `Ctrl+Shift+I` 把上一次補框的所有幀整組還原。
+- `Ctrl+Shift+I` 把上一次補框的所有幀整組還原(與「改 id」共用同一個還原點)。
+
+### 斷軌換號(改 id)
+
+tracker 斷軌時同一個目標會被切成兩個號碼,逐幀改號很慢。改成:點該段任一個框,一次把整條軌跡換掉。
+
+用法:點選要改的那段任一個框 → `Ctrl+R` → 輸入目標 `track_id` → 確認。
+
+規則:
+
+- 軌跡身分同樣是 **`(label, track_id)`**。把 person#7 改成 #3 不會動到 drone#7 —— 理由與內插補框相同:下游把 person / drone 拆成兩個清單各自評估,串號不會讓任何流程報錯,只會靜默算錯。
+- 目標號碼**已存在於某些幀**時先警告並列出那些 seq:改完那幾幀會同時出現兩個同號框。斷軌的兩段通常各佔不同的幀、不會重疊,所以重疊多半代表這兩段其實不是同一個目標 —— 看過再決定要不要照做。
+- 只有目標號、沒有來源號的幀不算衝突 —— 那正是斷軌另一段本來就該保留的框。
+- 只改 `track_id`,不動 bbox / ppe / label,不新增也不刪除框。
+- `Ctrl+Shift+I` 整組復原。這個還原點與補框共用,**後做的那次會蓋掉前一次**;單幀 `Ctrl+Z` 只救得回一幀。
 
 ### 偵測帶
 
@@ -189,16 +204,16 @@ uv run --project D:\ws\gt_labeling python scripts/verify_gui.py <gt_sample_root>
 
 ## 專案結構
 
-| 檔案                                                   | 職責                                                       |
-| ------------------------------------------------------ | ---------------------------------------------------------- |
-| [main.py](main.py)                                     | 程式進入點                                                 |
-| [gt_labeling/\_\_main\_\_.py](gt_labeling/__main__.py) | 命令列參數解析、QApplication 啟動                          |
-| [gt_labeling/model.py](gt_labeling/model.py)           | `Det` / `FrameLabel` 資料結構、JSON 讀寫、內插、undo stack |
-| [gt_labeling/dataset.py](gt_labeling/dataset.py)       | 資料夾掃描、影像 LRU 快取與背景預解碼                      |
-| [gt_labeling/transform.py](gt_labeling/transform.py)   | normalized ↔ widget 座標的**唯一**換算處                   |
-| [gt_labeling/canvas.py](gt_labeling/canvas.py)         | 自繪影像/標註畫布,zoom / pan / hit-test / 拖曳             |
-| [gt_labeling/panel.py](gt_labeling/panel.py)           | 側邊面板:幀清單、新框預設、選取框屬性、補框設定、偵測帶    |
-| [gt_labeling/window.py](gt_labeling/window.py)         | 主視窗接線:導覽、存檔、undo/redo、補框流程                 |
+| 檔案                                                   | 職責                                                             |
+| ------------------------------------------------------ | ---------------------------------------------------------------- |
+| [main.py](main.py)                                     | 程式進入點                                                       |
+| [gt_labeling/\_\_main\_\_.py](gt_labeling/__main__.py) | 命令列參數解析、QApplication 啟動                                |
+| [gt_labeling/model.py](gt_labeling/model.py)           | `Det` / `FrameLabel` 資料結構、JSON 讀寫、內插、換號、undo stack |
+| [gt_labeling/dataset.py](gt_labeling/dataset.py)       | 資料夾掃描、影像 LRU 快取與背景預解碼                            |
+| [gt_labeling/transform.py](gt_labeling/transform.py)   | normalized ↔ widget 座標的**唯一**換算處                         |
+| [gt_labeling/canvas.py](gt_labeling/canvas.py)         | 自繪影像/標註畫布,zoom / pan / hit-test / 拖曳                   |
+| [gt_labeling/panel.py](gt_labeling/panel.py)           | 側邊面板:幀清單、新框預設、選取框屬性、補框設定、偵測帶          |
+| [gt_labeling/window.py](gt_labeling/window.py)         | 主視窗接線:導覽、存檔、undo/redo、補框與換號流程                 |
 
 ### 設計取捨
 

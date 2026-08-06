@@ -9,6 +9,7 @@ from PyQt6.QtGui import QAction, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -20,7 +21,15 @@ from PyQt6.QtWidgets import (
 
 from .canvas import ImageCanvas
 from .dataset import FrameEntry, ImageStore, load_all, scan_root
-from .model import Det, FrameLabel, UndoStack, interpolate_missing, load_frame
+from .model import (
+    Det,
+    FrameLabel,
+    Remap,
+    UndoStack,
+    interpolate_missing,
+    load_frame,
+    plan_remap,
+)
 from .panel import (
     DEFAULT_MAX_GAP,
     BandPanel,
@@ -34,6 +43,8 @@ UNDO_LIMIT = 60
 PREFETCH_RADIUS = 2
 DEFAULT_WIDTH = 1680
 DEFAULT_HEIGHT = 940
+# 撞號警告最多列幾個 seq:列完 600 幀會把對話框撐出螢幕,反而看不到按鈕。
+CONFLICT_PREVIEW = 12
 
 HELP_TEXT = """\
 A / ← 上一張    D / → 下一張
@@ -43,7 +54,8 @@ A / ← 上一張    D / → 下一張
 左鍵點框 選取,拖角邊改大小,拖框內移動
 Delete 刪除選取框    F 還原檢視
 Ctrl+S 存檔   Ctrl+Z 復原   Ctrl+Shift+Z 重做
-Ctrl+I 補框(選取框的 track)   Ctrl+Shift+I 復原補框"""
+Ctrl+I 補框(選取框的 track)   Ctrl+R 改 id(整條軌跡換號)
+Ctrl+Shift+I 復原上次批次(補框 / 改 id)"""
 
 
 class MainWindow(QMainWindow):
@@ -57,8 +69,11 @@ class MainWindow(QMainWindow):
         self.undo_stacks: list[UndoStack] = []
         self.index = -1
         self._placement_checked = False
-        # 上一次補框前的快照:frame index -> 該幀原本的 dets,用於一鍵整組還原。
-        self._last_interp: dict[int, list[Det]] = {}
+        # 上一次跨幀批次改動前的快照:frame index -> 該幀原本的 dets,用於一鍵整組還原。
+        # 補框與改 id 共用一份:兩者都是「一次動很多幀」,單幀 Ctrl+Z 救不回來。代價是
+        # 後做的那次會蓋掉前一次的還原點,所以訊息一律講清楚復原的是哪一次操作。
+        self._last_bulk: dict[int, list[Det]] = {}
+        self._last_bulk_what = ""
 
         self.store = ImageStore(cache_size, self)
         self.store.ready.connect(self._on_image_ready)
@@ -169,14 +184,22 @@ class MainWindow(QMainWindow):
         self.act_interp.setToolTip("把選取框所屬 track 的錨點之間補滿(Ctrl+I)")
         self.act_interp.triggered.connect(self._interpolate)
 
-        self.act_interp_undo = QAction("復原補框", self)
-        self.act_interp_undo.setShortcut(QKeySequence("Ctrl+Shift+I"))
-        self.act_interp_undo.triggered.connect(self._undo_interpolation)
+        self.act_remap = QAction("改 id", self)
+        self.act_remap.setShortcut(QKeySequence("Ctrl+R"))
+        self.act_remap.setToolTip(
+            "把選取框所屬 track 的 id 在所有幀改成指定號碼,用來接回斷軌(Ctrl+R)")
+        self.act_remap.triggered.connect(self._remap_track)
+
+        self.act_bulk_undo = QAction("復原上次批次", self)
+        self.act_bulk_undo.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        self.act_bulk_undo.setToolTip(
+            "整組還原上一次跨幀批次改動(補框 / 改 id)(Ctrl+Shift+I)")
+        self.act_bulk_undo.triggered.connect(self._undo_last_bulk)
 
         for action in (
             self.act_open, self.act_prev, self.act_next, self.act_save,
             self.act_undo, self.act_redo, self.act_delete, self.act_fit,
-            self.act_interp, self.act_interp_undo, self.act_autosave,
+            self.act_interp, self.act_remap, self.act_bulk_undo, self.act_autosave,
         ):
             self.addAction(action)
             toolbar.addAction(action)
@@ -300,7 +323,8 @@ class MainWindow(QMainWindow):
         self.entries = entries
         self.frames = frames
         # 快照裡存的是舊資料集的 frame index,換資料夾後必須丟掉。
-        self._last_interp = {}
+        self._last_bulk = {}
+        self._last_bulk_what = ""
         self.undo_stacks = []
         for frame in frames:
             stack = UndoStack(UNDO_LIMIT)
@@ -536,7 +560,7 @@ class MainWindow(QMainWindow):
         touched = plan.frame_indexes
         if not touched:
             return
-        self._last_interp = {i: self.frames[i].snapshot() for i in touched}
+        self._snapshot_bulk(touched, f"補 {len(plan.additions)} 框")
         for index, new_det in plan.additions:
             self.frames[index].dets.append(new_det)
         for index in touched:
@@ -550,17 +574,123 @@ class MainWindow(QMainWindow):
             6000,
         )
 
-    def _undo_interpolation(self) -> None:
-        if not self._last_interp:
-            self.statusBar().showMessage("沒有可復原的補框", 3000)
+    # -------------------------------------------------------------------- 改 id
+
+    def _remap_track(self) -> None:
+        """把選取框所屬 track 的 id 在所有幀換成指定號碼。
+
+        tracker 斷軌時同一個目標會被切成兩個號碼,逐幀改號很慢,所以整條一次換。
+
+        入口與補框一致(先點框再按),前置條件不足時一律說明原因而非停用按鈕:
+        這個動作多半靠快捷鍵觸發,靜默失敗會讓人完全不知道少做了哪一步。
+        """
+        if not self.frames:
             return
-        touched = sorted(self._last_interp)
-        for index, snapshot in self._last_interp.items():
+        det = self.canvas.selected_det
+        if det is None:
+            self.statusBar().showMessage(
+                "先點選一個框:改 id 要靠它決定改哪一條 track", 6000)
+            return
+        if det.track_id is None:
+            self.statusBar().showMessage(
+                "選取的框沒有 track_id,先在右側「選取的框」填一個號碼再改", 6000)
+            return
+
+        label, old_id = det.label, det.track_id
+        new_id, confirmed = QInputDialog.getInt(
+            self,
+            "改 id",
+            f"把 {label} #{old_id} 在所有幀改成:",
+            old_id,
+            0,
+            2_000_000_000,
+            1,
+        )
+        if not confirmed:
+            return
+        if new_id == old_id:
+            self.statusBar().showMessage("目標與來源相同,沒有改動", 4000)
+            return
+
+        plan = plan_remap(self.frames, label, old_id, new_id)
+        if not plan.targets:
+            self.statusBar().showMessage(f"找不到 {label} #{old_id} 的框", 4000)
+            return
+
+        summary = (f"{label} #{old_id} → #{new_id}\n"
+                   f"共 {len(plan.frame_indexes)} 幀 / {plan.box_count} 框會改號。")
+        if plan.conflicts:
+            listed = ", ".join(str(s) for s in plan.conflicts[:CONFLICT_PREVIEW])
+            more = (f" …等 {len(plan.conflicts)} 幀"
+                    if len(plan.conflicts) > CONFLICT_PREVIEW else "")
+            answer = QMessageBox.warning(
+                self,
+                "改 id — 會撞號",
+                f"{summary}\n\n"
+                f"但有 {len(plan.conflicts)} 幀已經存在 {label} #{new_id},"
+                f"改完那幾幀會同時出現兩個 #{new_id}:\n"
+                f"  seq {listed}{more}\n\n"
+                f"斷軌的兩段通常各佔不同的幀、不會重疊,所以這多半代表這兩段其實"
+                f"不是同一個目標。仍要改嗎?",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+        else:
+            answer = QMessageBox.question(
+                self,
+                "改 id",
+                f"{summary}\n\n要改嗎?",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+        if answer == QMessageBox.StandardButton.Ok:
+            self.apply_remap(plan, label, old_id, new_id)
+
+    def apply_remap(self, plan: Remap, label: str, old_id: int, new_id: int) -> None:
+        """套用一份換號計畫。與 ``_remap_track`` 的對話框分開,方便直接驗收。"""
+        touched = plan.frame_indexes
+        if not touched:
+            return
+        self._snapshot_bulk(touched, f"{label} #{old_id} → #{new_id}")
+        for _, target in plan.targets:
+            target.track_id = new_id
+        for index in touched:
+            self.undo_stacks[index].commit(self.frames[index].snapshot())
+
+        self._after_bulk_change(touched)
+        # 「沿用 #id」是黏著值,不會因為框的內容改變而更新;選取框既然換了號,
+        # 接著畫的新框要跟著新號碼,否則會默默補出剛剛才淘汰掉的舊號。
+        selected = self.canvas.selected_det
+        if selected is not None and selected.track_id == new_id:
+            self.new_panel.set_follow_candidate(new_id)
+
+        seqs = [self.frames[i].seq for i in touched]
+        self.statusBar().showMessage(
+            f"已把 {label} #{old_id} 改成 #{new_id}({len(touched)} 幀 / "
+            f"{plan.box_count} 框,seq {min(seqs)}..{max(seqs)}),"
+            f"Ctrl+Shift+I 可整組復原",
+            6000,
+        )
+
+    # ------------------------------------------------------- 跨幀批次改動的復原
+
+    def _snapshot_bulk(self, touched: list[int], what: str) -> None:
+        self._last_bulk = {i: self.frames[i].snapshot() for i in touched}
+        self._last_bulk_what = what
+
+    def _undo_last_bulk(self) -> None:
+        if not self._last_bulk:
+            self.statusBar().showMessage("沒有可復原的批次改動", 3000)
+            return
+        touched = sorted(self._last_bulk)
+        what = self._last_bulk_what
+        for index, snapshot in self._last_bulk.items():
             self.frames[index].restore(snapshot)
             self.undo_stacks[index].commit(self.frames[index].snapshot())
-        self._last_interp = {}
+        self._last_bulk = {}
+        self._last_bulk_what = ""
         self._after_bulk_change(touched)
-        self.statusBar().showMessage(f"已復原 {len(touched)} 幀的補框", 4000)
+        self.statusBar().showMessage(f"已復原「{what}」({len(touched)} 幀)", 4000)
 
     def _after_bulk_change(self, touched: list[int]) -> None:
         """跨幀改動後的統一刷新。"""
@@ -663,9 +793,10 @@ class MainWindow(QMainWindow):
         self.act_redo.setEnabled(bool(stack and stack.can_redo))
         self.act_delete.setEnabled(self.canvas.selected_det is not None)
         # 刻意不依「已勾選 / 已選框」停用:停用的動作按下去毫無反應,
-        # 使用者無從得知少了哪一步。改由 _interpolate 逐項說明原因。
+        # 使用者無從得知少了哪一步。改由 _interpolate / _remap_track 逐項說明原因。
         self.act_interp.setEnabled(has_data)
-        self.act_interp_undo.setEnabled(bool(self._last_interp))
+        self.act_remap.setEnabled(has_data)
+        self.act_bulk_undo.setEnabled(bool(self._last_bulk))
 
     def _refresh_status(self) -> None:
         if not (0 <= self.index < len(self.frames)):

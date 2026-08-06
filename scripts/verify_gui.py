@@ -20,7 +20,13 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from gt_labeling.canvas import COLOR_DRONE, det_color
-from gt_labeling.model import canonical_bbox, interpolate_missing, load_frame
+from gt_labeling.model import (
+    Det,
+    canonical_bbox,
+    interpolate_missing,
+    load_frame,
+    plan_remap,
+)
 from gt_labeling.window import MainWindow
 
 FAILURES: list[str] = []
@@ -421,7 +427,7 @@ def main() -> int:
             print(f"       參考:與真實框 IoU 中位 {sorted(ious)[len(ious) // 2]:.3f}"
                   f"(5 秒抽樣資料本來就低,逐幀資料才有意義)")
 
-        window._undo_interpolation()
+        window._undo_last_bulk()
         app.processEvents()
         check(all(not any(d.track_id == probe_tid for d in window.frames[i].dets)
                   for i in hole), "Ctrl+Shift+I 整組復原,補的框全部消失")
@@ -441,6 +447,86 @@ def main() -> int:
               "取消勾選後按補框不會改動任何資料")
         check("勾選" in window.statusBar().currentMessage(),
               f"且有說明原因:{window.statusBar().currentMessage()!r}")
+
+        section("改 id:把斷軌的兩段接回同一個號碼")
+        # 前置不足時要說明原因並原地返回,而不是靜默失敗、也不是彈對話框把 offscreen 卡死。
+        canvas.select(-1)
+        app.processEvents()
+        ids_before = [(d.label, d.track_id) for f in window.frames for d in f.dets]
+        window._remap_track()
+        app.processEvents()
+        check([(d.label, d.track_id) for f in window.frames for d in f.dets] == ids_before,
+              "沒選框時按「改 id」不動任何資料")
+        check("先點選" in window.statusBar().currentMessage(),
+              f"且有說明原因:{window.statusBar().currentMessage()!r}")
+        check(window.act_remap.isEnabled(), "有資料時「改 id」動作可觸發(不靜默失敗)")
+
+        # 造一條斷軌:把 probe track 的後半段改成一個全資料集沒人用的號碼。
+        spare = max(d.track_id for f in window.frames for d in f.dets
+                    if d.track_id is not None) + 1
+        tail = {i: [pos for pos, d in enumerate(window.frames[i].dets) if on_track(d)]
+                for i in rows[len(rows) // 2:]}
+        for i, positions in tail.items():
+            for pos in positions:
+                window.frames[i].dets[pos].track_id = spare
+        broken = sum(len(p) for p in tail.values())
+        check(broken >= 1, f"把後 {len(tail)} 幀的 {broken} 個框改成 #{spare},製造斷軌")
+
+        # 同號但不同 label 的框:認軌是 (label, track_id),它絕對不能被一起改掉。
+        decoy_row = next(iter(tail))
+        decoy = Det(label="drone", track_id=spare, ppe=None,
+                    bbox=[0.90, 0.10, 0.95, 0.15])
+        window.frames[decoy_row].dets.append(decoy)
+
+        plan = plan_remap(window.frames, probe_label, spare, probe_tid)
+        check(plan.frame_indexes == sorted(tail),
+              f"算出要改 {len(tail)} 幀(實際 {len(plan.frame_indexes)})")
+        check(plan.box_count == broken,
+              f"算出要改 {broken} 個框(實際 {plan.box_count})")
+        check(not plan.conflicts,
+              f"斷軌兩段不重疊 → 沒有撞號警告(實際 {plan.conflicts})")
+
+        window.apply_remap(plan, probe_label, spare, probe_tid)
+        app.processEvents()
+        check(all(sum(1 for d in window.frames[i].dets
+                      if d.label == probe_label and d.track_id == probe_tid)
+                  == len(positions) for i, positions in tail.items()),
+              f"後半段全部接回 {probe_label} #{probe_tid}")
+        check(not any(d.label == probe_label and d.track_id == spare
+                      for f in window.frames for d in f.dets),
+              f"整份資料集不再有 {probe_label} #{spare}")
+        check(decoy.track_id == spare,
+              f"同號的 drone #{spare} 沒被波及(認軌是 (label, track_id) 而非 track_id)")
+        check(window.frames[decoy_row].dirty, "改號後該幀標記未存")
+
+        # 撞號:同一幀同時有來源號與目標號時必須警告 —— 那多半代表兩段不是同一個目標。
+        overlap_row = rows[0]
+        extra = Det(label=probe_label, track_id=spare, ppe="ng",
+                    bbox=[0.05, 0.05, 0.09, 0.12])
+        window.frames[overlap_row].dets.append(extra)
+        clash = plan_remap(window.frames, probe_label, spare, probe_tid)
+        check(clash.conflicts == [window.frames[overlap_row].seq],
+              f"同幀已有 #{probe_tid} 時列入撞號警告:seq {clash.conflicts}")
+        check(window.frames[rows[1]].seq not in clash.conflicts,
+              "只有目標號、沒有來源號的幀不算撞號(斷軌另一段本來就該保留)")
+        window.frames[overlap_row].dets.remove(extra)
+
+        window._undo_last_bulk()
+        app.processEvents()
+        check(all(all(window.frames[i].dets[pos].track_id == spare for pos in positions)
+                  for i, positions in tail.items()),
+              f"Ctrl+Shift+I 整組復原,後半段回到斷軌狀態 #{spare}")
+
+        # 還原成磁碟上的樣子:號碼改回去、拿掉造出來的 drone。
+        for i, positions in tail.items():
+            for pos in positions:
+                window.frames[i].dets[pos].track_id = probe_tid
+        window.frames[decoy_row].dets[:] = [
+            d for d in window.frames[decoy_row].dets
+            if not (d.label == "drone" and d.track_id == spare)
+        ]
+        check(not any(window.frames[i].dirty for i in tail),
+              "還原後這幾幀回到已存狀態")
 
         section("清單待補標記")
         # 樣本資料不保證含 null,自己在記憶體造一個待補狀態再還原,驗證與資料內容無關。

@@ -260,6 +260,48 @@ def interpolate_missing(
     return result
 
 
+@dataclass(slots=True)
+class Remap:
+    """一次 id 轉換的計畫:要改哪些框、哪些幀改完會同幀撞號。"""
+
+    targets: list[tuple[int, Det]] = field(default_factory=list)  # (frame index, 要改號的框)
+    conflicts: list[int] = field(default_factory=list)  # 改完會出現兩個同號框的 seq
+
+    @property
+    def frame_indexes(self) -> list[int]:
+        return sorted({i for i, _ in self.targets})
+
+    @property
+    def box_count(self) -> int:
+        return len(self.targets)
+
+
+def plan_remap(frames: list[FrameLabel], label: str, old_id: int, new_id: int) -> Remap:
+    """算出把 ``(label, old_id)`` 全域改成 ``new_id`` 會動到哪些框。
+
+    tracker 斷軌時同一個目標會被切成兩個號碼,逐幀改號很慢,所以整條軌跡一次換號。
+
+    軌跡身分是 ``(label, track_id)``,理由同 :func:`interpolate_missing`:只認
+    track_id 的話,把 person#7 改成 #3 會連 drone#7 一起改號——而下游把 person /
+    drone 拆成兩個清單各自評估,這種串號不會有人報錯,只會靜默算錯。
+
+    ``conflicts`` 只收「同一幀**同時**有 ``(label, old_id)`` 與 ``(label, new_id)``」
+    的 seq:改完那一幀會出現兩個同號框,通常代表這兩段其實不是同一個目標。反過來,
+    只有 new_id 沒有 old_id 的幀不算衝突——斷軌合併的正常樣貌就是兩段各佔不同的幀。
+
+    只算不改;套用交給呼叫方,才能在中間插入確認與快照。
+    """
+    result = Remap()
+    for index, frame in enumerate(frames):
+        hits = [d for d in frame.dets if d.label == label and d.track_id == old_id]
+        if not hits:
+            continue
+        result.targets.extend((index, d) for d in hits)
+        if any(d.label == label and d.track_id == new_id for d in frame.dets):
+            result.conflicts.append(frame.seq)
+    return result
+
+
 class UndoStack:
     """整份 dets 的快照式 undo/redo。
 
