@@ -439,6 +439,59 @@ def test_transform_roundtrip() -> None:
           f"200 次拖曳後框尺寸漂移 {width_drift:.3e} / {height_drift:.3e}")
 
 
+def test_transform_wrap() -> None:
+    section("ViewTransform 環繞:整數圈與 offset 取模")
+    tf = ViewTransform()
+    tf.set_image_size(3840, 1920)
+    tf.wrap_x = True
+    tf.zoom = 1000.0 / 3840.0          # span_x = 1000
+    check(round(tf.span_x, 6) == 1000.0, f"span_x = {tf.span_x}")
+
+    tf.off_x = 0.0
+    check(list(tf.visible_shifts(1600.0)) == [0, 1],
+          f"影像左緣貼齊視窗左邊,需要 2 份 {list(tf.visible_shifts(1600.0))}")
+    tf.off_x = -500.0
+    check(list(tf.visible_shifts(1600.0)) == [0, 1, 2],
+          f"往左捲半份,需要 3 份 {list(tf.visible_shifts(1600.0))}")
+    tf.off_x = 300.0
+    check(list(tf.visible_shifts(1600.0)) == [-1, 0, 1],
+          f"往右捲時左邊要補一份 {list(tf.visible_shifts(1600.0))}")
+
+    # 放大到單份就蓋滿視窗時只需要一份
+    tf.zoom = 10000.0 / 3840.0
+    tf.off_x = -3000.0
+    check(list(tf.visible_shifts(1600.0)) == [0],
+          f"單份蓋滿視窗只畫一份 {list(tf.visible_shifts(1600.0))}")
+
+    # 非環繞恆為一份,且 clamp_offset 維持原本的夾住行為
+    flat = ViewTransform()
+    flat.set_image_size(3840, 1920)
+    flat.zoom = 1000.0 / 3840.0
+    flat.off_x = 999.0
+    check(list(flat.visible_shifts(1600.0)) == [0], "非環繞恆回 1 份")
+    flat.clamp_offset(QSize(1600, 900))
+    # round 到 6 位:span_x 本身已有 1e-13 量級的浮點誤差(見上方 span_x 斷言),
+    # 嚴格 == 300.0 會被這個誤差放大成假 FAIL,與這次改動無關。
+    check(round(flat.off_x, 6) == 300.0,
+          f"非環繞、影像比視窗小 → 置中到 300(既有行為,實際 {flat.off_x})")
+
+    # 環繞下 pan 不被夾住,只被取模;取模後畫面內容不變(靠補圈)
+    tf2 = ViewTransform()
+    tf2.set_image_size(3840, 1920)
+    tf2.wrap_x = True
+    tf2.zoom = 1000.0 / 3840.0
+    tf2.off_x = 4321.0
+    tf2.clamp_offset(QSize(1600, 900))
+    check(0.0 <= tf2.off_x < tf2.span_x, f"off_x 被取模回 [0, span_x) {tf2.off_x}")
+    check(round(tf2.off_x, 6) == 321.0, f"4321 取模 1000 = 321(實際 {tf2.off_x})")
+
+    # y 方向在環繞下維持原本的夾住行為
+    tf2.zoom = 2.0
+    tf2.off_y = 5000.0
+    tf2.clamp_offset(QSize(1600, 900))
+    check(tf2.off_y == 0.0, f"y 仍被夾住不許拖出視窗(實際 {tf2.off_y})")
+
+
 def main() -> int:
     source = Path(
         sys.argv[1] if len(sys.argv) > 1
@@ -464,6 +517,7 @@ def main() -> int:
     test_canonical_bbox()
     test_frame_wrap_state()
     test_transform_roundtrip()
+    test_transform_wrap()
 
     print("\n" + "=" * 60)
     if FAILURES:

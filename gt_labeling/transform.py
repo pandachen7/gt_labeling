@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, QSizeF
@@ -27,6 +28,8 @@ class ViewTransform:
     zoom: float = 1.0
     off_x: float = 0.0
     off_y: float = 0.0
+    # equirect 環景:x 方向無限環繞(影像左右重複鋪排、pan 不夾)。y 不環繞。
+    wrap_x: bool = False
 
     # ------------------------------------------------------------------ 影像尺寸
 
@@ -78,6 +81,19 @@ class ViewTransform:
     def image_rect(self) -> QRectF:
         return QRectF(self.off_x, self.off_y, self.span_x, self.span_y)
 
+    def visible_shifts(self, view_w: float) -> range:
+        """x 環繞時,與視窗相交的整數圈編號;非環繞恆為 ``range(0, 1)``。
+
+        第 k 圈的影像佔 widget 的 ``[off_x + k*span_x, off_x + (k+1)*span_x]``。
+        繪製與 hit-test 都經由這裡取圈數,環繞語意因此只有一個出處 —— 與「座標
+        換算只在 ViewTransform」的既有不變量同一個理由。
+        """
+        if not self.wrap_x or self.span_x <= 0.0:
+            return range(1)
+        k_min = math.floor(-self.off_x / self.span_x - 1.0) + 1
+        k_max = math.ceil((view_w - self.off_x) / self.span_x) - 1
+        return range(k_min, k_max + 1)
+
     # --------------------------------------------------------------- 縮放與平移
 
     def fit_zoom(self, view: QSize) -> float:
@@ -112,9 +128,16 @@ class ViewTransform:
         self.off_y += dy
 
     def clamp_offset(self, view: QSize) -> None:
-        """影像比視窗小則置中,比視窗大則不許拖出視窗外。"""
+        """影像比視窗小則置中,比視窗大則不許拖出視窗外。
+
+        環景模式的 x 是例外:不夾、只取模。夾住的話接縫永遠停在視窗邊緣,人就沒辦法
+        把它拉到中間畫框;取模則順便擋掉長時間平移累積的浮點漂移,而畫面內容不受影響
+        —— 少掉的那一圈由 :meth:`visible_shifts` 補回來。
+        """
         if view.width() > 0:
-            if self.span_x <= view.width():
+            if self.wrap_x:
+                self.off_x %= self.span_x
+            elif self.span_x <= view.width():
                 self.off_x = (view.width() - self.span_x) / 2.0
             else:
                 self.off_x = min(max(self.off_x, view.width() - self.span_x), 0.0)
