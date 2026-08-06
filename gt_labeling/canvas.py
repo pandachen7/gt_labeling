@@ -444,7 +444,9 @@ class ImageCanvas(QWidget):
         if key in (Qt.Key.Key_D, Qt.Key.Key_Right):
             self.navigateRequested.emit(1)
             return
-        if key == Qt.Key.Key_F:
+        # 只吃單獨的 F:Ctrl+F 是視窗層的「找 track」,萬一沒被攔下來(動作停用等)
+        # 而落到這裡,不該悄悄變成還原檢視——那會把使用者的縮放位置洗掉。
+        if key == Qt.Key.Key_F and event.modifiers() == Qt.KeyboardModifier.NoModifier:
             self.fit_view()
             return
         if key == Qt.Key.Key_Escape:

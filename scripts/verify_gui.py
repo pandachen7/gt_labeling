@@ -23,6 +23,7 @@ from gt_labeling.canvas import COLOR_DRONE, det_color
 from gt_labeling.model import (
     Det,
     canonical_bbox,
+    find_track,
     interpolate_missing,
     load_frame,
     plan_remap,
@@ -629,6 +630,140 @@ def main() -> int:
             check(not dup_frame.dirty and "DUP" not in
                   window.list_panel.list.item(dup_row).text(),
                   "移除後標記消失且不算未存")
+
+        section("找 track(Ctrl+F)")
+        # 搜尋是唯讀動作:整段跑完不該讓任何一幀變成未存。
+        check(not any(f.dirty for f in window.frames), "搜尋前所有幀都是已存狀態")
+        hits = find_track(window.frames, probe_label, probe_tid)
+        manual = [
+            (i, k)
+            for i, f in enumerate(window.frames)
+            for k, d in enumerate(f.dets)
+            if d.label == probe_label and d.track_id == probe_tid
+        ]
+        check(hits == manual, f"find_track 列出 {len(hits)} 次出現,與手算逐項一致")
+        check(len(hits) >= 3, f"{probe_label}#{probe_tid} 至少出現 3 次(實際 {len(hits)})")
+
+        # 認軌是 (label, track_id):同號但不同 label 的框絕不能被限定搜尋撈到。
+        other = "drone" if probe_label == "person" else "person"
+        decoy2 = Det(label=other, track_id=probe_tid,
+                     ppe="ng" if other == "person" else None,
+                     bbox=[0.80, 0.20, 0.85, 0.26])
+        decoy2_frame = window.frames[hits[0][0]]
+        decoy2_frame.dets.append(decoy2)
+        check(find_track(window.frames, probe_label, probe_tid) == hits,
+              f"多了 {other}#{probe_tid} 也不影響限定 {probe_label} 的搜尋結果")
+        check(len(find_track(window.frames, None, probe_tid)) == len(hits) + 1,
+              "選「全部」時同號的另一個 label 會被列入")
+        decoy2_frame.dets.remove(decoy2)
+        check(not decoy2_frame.dirty, "移除誘餌後該幀回到已存狀態")
+
+        # Ctrl+F:真的按鍵。同時驗證它沒被畫布的 F(還原檢視)吃掉。
+        first_i, first_k = hits[0]
+        window._goto(first_i)
+        canvas.select(first_k)
+        window.find_edit.clear()
+        window.find_kind.setCurrentIndex(0)
+        canvas.setFocus()
+        app.processEvents()
+        off_fit_zoom = canvas.tf.zoom * 1.5
+        canvas.tf.zoom = off_fit_zoom
+        QTest.keyClick(canvas, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        app.processEvents()
+        check(window.find_edit.hasFocus(), "Ctrl+F 聚焦搜尋欄(快捷鍵真的接上)")
+        check(abs(canvas.tf.zoom - off_fit_zoom) < 1e-9,
+              "Ctrl+F 沒被畫布的 F 吃掉(縮放沒被打回 fit)")
+        check(window.find_edit.text() == str(probe_tid),
+              f"預填選取框的號碼(實際 {window.find_edit.text()!r})")
+        check(window.find_kind.currentData() == probe_label,
+              f"連 label 一起預填(實際 {window.find_kind.currentData()!r})")
+
+        # Enter / Shift+Enter:焦點在搜尋欄時連按就能走完整條軌跡。
+        QTest.keyClick(window.find_edit, Qt.Key.Key_Return)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == hits[1],
+              f"Enter 跳到第 2 次出現(實際 {(window.index, canvas.selected_index)},"
+              f"預期 {hits[1]})")
+        picked = canvas.selected_det
+        check(picked is not None and picked.label == probe_label
+              and picked.track_id == probe_tid,
+              "跳過去後選中的正是該 track 的框")
+        check(window.find_edit.hasFocus(), "跳完焦點留在搜尋欄,可以連按 Enter")
+        check(f"/{len(hits)} 次出現" in window.statusBar().currentMessage(),
+              f"訊息報出第幾次 / 共幾次:{window.statusBar().currentMessage()!r}")
+
+        QTest.keyClick(window.find_edit, Qt.Key.Key_Return,
+                       Qt.KeyboardModifier.ShiftModifier)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == hits[0],
+              f"Shift+Enter 退回第 1 次出現(實際 {(window.index, canvas.selected_index)})"
+              f"——沒被 QLineEdit 的 returnPressed 當成往後找")
+
+        # F3 / Shift+F3:焦點在畫布時也能繼續找,且不把焦點搬進輸入框。
+        canvas.setFocus()
+        app.processEvents()
+        QTest.keyClick(canvas, Qt.Key.Key_F3)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == hits[1],
+              f"F3 找下一個(實際 {(window.index, canvas.selected_index)})")
+        check(canvas.hasFocus(), "F3 不把焦點搬進搜尋欄(A/D 翻幀還能用)")
+        QTest.keyClick(canvas, Qt.Key.Key_F3, Qt.KeyboardModifier.ShiftModifier)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == hits[0], "Shift+F3 找上一個")
+
+        # 掃到盡頭繞回另一端。
+        window._goto(hits[-1][0])
+        canvas.select(hits[-1][1])
+        app.processEvents()
+        window._find_next(1)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == hits[0],
+              f"最後一次出現處再找下一個 → 繞回第一次"
+              f"(實際 {(window.index, canvas.selected_index)})")
+        check("繞回" in window.statusBar().currentMessage(),
+              f"且訊息註明繞回:{window.statusBar().currentMessage()!r}")
+        window._find_next(-1)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == hits[-1], "反向也會繞回最後一次")
+
+        # 同幀兩個同號框(清單的 DUP)要逐個停,不能整幀跳過——第二個框才是要修的。
+        dup_i = hits[0][0]
+        twin2 = Det(label=probe_label, track_id=probe_tid,
+                    ppe="ng" if probe_label == "person" else None,
+                    bbox=[0.10, 0.60, 0.14, 0.70])
+        window.frames[dup_i].dets.append(twin2)
+        in_frame = [k for i, k in find_track(window.frames, probe_label, probe_tid)
+                    if i == dup_i]
+        check(len(in_frame) == 2, f"同幀兩個同號框列出 2 筆命中(實際 {len(in_frame)})")
+        window._goto(dup_i)
+        canvas.select(in_frame[0])
+        app.processEvents()
+        window._find_next(1)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == (dup_i, in_frame[1]),
+              f"停在同幀的第二個同號框(實際 {(window.index, canvas.selected_index)})")
+        window.frames[dup_i].dets.remove(twin2)
+        check(not window.frames[dup_i].dirty, "移除後該幀回到已存狀態")
+
+        # 前置不足時要說明原因並原地不動(同補框 / 改 id 的慣例)。
+        stay = (window.index, canvas.selected_index)
+        nobody = max(d.track_id for f in window.frames for d in f.dets
+                     if d.track_id is not None) + 999
+        window.find_edit.setText(str(nobody))
+        window._find_next(1)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == stay, "找不到時位置不動")
+        check("找不到" in window.statusBar().currentMessage(),
+              f"且說明找不到:{window.statusBar().currentMessage()!r}")
+
+        window.find_edit.clear()
+        window._find_next(1)
+        app.processEvents()
+        check((window.index, canvas.selected_index) == stay, "沒填號碼時位置不動")
+        check("填一個 track_id" in window.statusBar().currentMessage(),
+              f"且說明少了哪一步:{window.statusBar().currentMessage()!r}")
+
+        check(not any(f.dirty for f in window.frames), "整段搜尋沒有改動任何資料")
 
         section("輸出截圖")
         OUT_DIR.mkdir(exist_ok=True)

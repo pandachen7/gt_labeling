@@ -8,6 +8,7 @@ from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtGui import QAction, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -22,10 +24,12 @@ from PyQt6.QtWidgets import (
 from .canvas import ImageCanvas
 from .dataset import FrameEntry, ImageStore, load_all, scan_root
 from .model import (
+    LABELS,
     Det,
     FrameLabel,
     Remap,
     UndoStack,
+    find_track,
     interpolate_missing,
     load_frame,
     plan_remap,
@@ -55,7 +59,9 @@ A / ← 上一張    D / → 下一張    Home / End 首幀 / 末幀
 Delete 刪除選取框    F 還原檢視
 Ctrl+S 存檔   Ctrl+Z 復原   Ctrl+Shift+Z 重做
 Ctrl+I 補框(選取框的 track)   Ctrl+R 改 id(整條軌跡換號)
-Ctrl+Shift+I 復原上次批次(補框 / 改 id)"""
+Ctrl+Shift+I 復原上次批次(補框 / 改 id)
+Ctrl+F 找 track(F3 下一個 / Shift+F3 上一個)
+  搜尋欄內:Enter 下一個 / Shift+Enter 上一個 / Esc 回畫布"""
 
 
 class MainWindow(QMainWindow):
@@ -204,6 +210,24 @@ class MainWindow(QMainWindow):
             "整組還原上一次跨幀批次改動(補框 / 改 id)(Ctrl+Shift+I)")
         self.act_bulk_undo.triggered.connect(self._undo_last_bulk)
 
+        self.act_find = QAction("找 track", self)
+        self.act_find.setShortcut(QKeySequence(QKeySequence.StandardKey.Find))
+        self.act_find.setToolTip(
+            "聚焦工具列的 track 搜尋欄,有選取框就預填它的軌跡(Ctrl+F)")
+        self.act_find.triggered.connect(self._focus_find)
+
+        self.act_find_next = QAction("找", self)
+        self.act_find_next.setShortcut(QKeySequence(Qt.Key.Key_F3))
+        self.act_find_next.setToolTip(
+            "跳到下一個出現該 track 的框(F3,或在搜尋欄按 Enter)")
+        self.act_find_next.triggered.connect(lambda: self._find_next(1))
+
+        self.act_find_prev = QAction("找上一個", self)
+        self.act_find_prev.setShortcut(QKeySequence("Shift+F3"))
+        self.act_find_prev.setToolTip(
+            "跳到上一個出現該 track 的框(Shift+F3,或在搜尋欄按 Shift+Enter)")
+        self.act_find_prev.triggered.connect(lambda: self._find_next(-1))
+
         for action in (
             self.act_open, self.act_prev, self.act_next, self.act_save,
             self.act_undo, self.act_redo, self.act_delete, self.act_fit,
@@ -220,6 +244,11 @@ class MainWindow(QMainWindow):
             self.canvas.addAction(action)
         toolbar.insertActions(self.act_save, [self.act_first, self.act_last])
 
+        # 三個都得 addAction 快捷鍵才生效,但只有「找」會進 toolbar:搜尋欄本體就在
+        # 下面,再擺兩顆按鈕會把工具列塞爆。Ctrl+F / Shift+F3 的入口寫在右下角說明。
+        for action in (self.act_find, self.act_find_next, self.act_find_prev):
+            self.addAction(action)
+
         toolbar.addSeparator()
         toolbar.addWidget(QLabel(" 跳到 seq "))
         self.jump_edit = QLineEdit(self)
@@ -230,6 +259,50 @@ class MainWindow(QMainWindow):
         act_jump = QAction("跳", self)
         act_jump.triggered.connect(self._jump_to_seq)
         toolbar.addAction(act_jump)
+
+        self._build_find_box(toolbar)
+
+    def _build_find_box(self, toolbar: QToolBar) -> None:
+        """工具列上的 track 搜尋欄:label 下拉 + 號碼 + 「找」。
+
+        label 下拉排在號碼前面,讀起來就是 ``person #7``——軌跡身分是
+        ``(label, track_id)``,把 label 擺在明處才不會讓人以為號碼是全域唯一的。
+        """
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" 找 track "))
+
+        self.find_kind = QComboBox(self)
+        self.find_kind.addItem("全部", None)
+        for name in LABELS:
+            self.find_kind.addItem(name, name)
+        self.find_kind.setFixedWidth(88)
+        self.find_kind.setToolTip(
+            "限定 label。軌跡身分是 (label, track_id):person #7 與 drone #7 是"
+            "兩條不同軌跡,選「全部」會兩條都停")
+        toolbar.addWidget(self.find_kind)
+
+        self.find_edit = QLineEdit(self)
+        self.find_edit.setFixedWidth(80)
+        self.find_edit.setPlaceholderText("track_id")
+        self.find_edit.setValidator(QIntValidator(0, 2_000_000_000, self))
+        self.find_edit.returnPressed.connect(lambda: self._find_next(1))
+        toolbar.addWidget(self.find_edit)
+        toolbar.addAction(self.act_find_next)
+
+        # Shift+Enter 與 Esc 綁在搜尋欄本身(WidgetShortcut)。Shift+Enter 非走
+        # shortcut 不可:QLineEdit 收到 Return 一律發 returnPressed、不分 modifier,
+        # 不先攔下來就會被當成「找下一個」。數字鍵盤的 Enter 是另一個 key,一併綁。
+        back = QAction("上一個", self.find_edit)
+        back.setShortcuts([QKeySequence("Shift+Return"), QKeySequence("Shift+Enter")])
+        back.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        back.triggered.connect(lambda: self._find_next(-1))
+        self.find_edit.addAction(back)
+
+        leave = QAction("離開搜尋欄", self.find_edit)
+        leave.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        leave.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        leave.triggered.connect(lambda: self.canvas.setFocus())
+        self.find_edit.addAction(leave)
 
     # --------------------------------------------------------------- 設定持久化
 
@@ -395,6 +468,87 @@ class MainWindow(QMainWindow):
                 f"沒有 seq={target},跳到最接近的 {self.frames[match].seq}", 4000
             )
         self._goto(match)
+
+    # ----------------------------------------------------------------- 找 track
+
+    def _focus_find(self) -> None:
+        """Ctrl+F:聚焦搜尋欄,有選取框就把它的整組 ``(label, id)`` 預填進去。
+
+        連 label 一起預填而不只填號碼:這個功能最常見的用法是「追我正在看的這條
+        軌跡」,而軌跡身分是 ``(label, track_id)``——只填號碼的話,person #7 與
+        drone #7 會混在一起輪流跳,追軌變成在兩條線之間來回。
+        """
+        det = self.canvas.selected_det
+        if det is not None and det.track_id is not None:
+            self.find_edit.setText(str(det.track_id))
+            index = self.find_kind.findData(det.label)
+            if index >= 0:
+                self.find_kind.setCurrentIndex(index)
+        self.find_edit.setFocus()
+        self.find_edit.selectAll()
+
+    def _find_next(self, step: int) -> None:
+        """跳到下一個(``step=1``)/ 上一個(``step=-1``)出現搜尋目標的框並選取它。
+
+        位置用 ``(frame index, det index)`` 字典序比較,所以同一幀有兩個同號框時
+        會逐個停下來,不會整幀跳過——撞號(清單上的 DUP)要看的正是第二個框。
+        起點含「目前選取的框」,沒選框時當前幀的第一個命中會先被選起來,不會直接
+        跳走:人多半是先想確認「這一幀到底有沒有」。
+
+        掃到盡頭繞回另一端並在訊息註明。不繞的話追到最後一幀就得手動回頭,而
+        「這條軌跡總共出現幾次、現在是第幾次」正是最想順便知道的事。
+
+        前置不足時一律說明原因(同 ``_interpolate`` / ``_remap_track``):這功能
+        多半靠快捷鍵觸發,靜默失敗會讓人不知道少做了哪一步。
+        """
+        if not self.frames:
+            return
+        text = self.find_edit.text().strip()
+        if not text:
+            self.statusBar().showMessage(
+                "先在工具列「找 track」填一個 track_id(Ctrl+F 直接聚焦)", 6000)
+            self.find_edit.setFocus()
+            return
+
+        track_id = int(text)
+        label = self.find_kind.currentData()
+        hits = find_track(self.frames, label, track_id)
+        what = f"{label} #{track_id}" if label else f"#{track_id}(不分 label)"
+        if not hits:
+            self.statusBar().showMessage(f"整份資料集找不到 {what}", 5000)
+            return
+
+        here = (self.index, self.canvas.selected_index)
+        if step > 0:
+            pos = next((n for n, hit in enumerate(hits) if hit > here), None)
+        else:
+            pos = next((n for n in reversed(range(len(hits))) if hits[n] < here), None)
+        wrapped = pos is None
+        if pos is None:
+            pos = 0 if step > 0 else len(hits) - 1
+
+        # 焦點原樣還回去:_goto 尾端會把焦點搶到畫布,但從搜尋欄按 Enter 的人要能
+        # 連按下去,從畫布按 F3 的人也不該被搬進輸入框(那會讓 A/D 翻幀失效)。
+        focused = QApplication.focusWidget()
+        frame_index, det_index = hits[pos]
+        self._goto(frame_index)
+        if self.index != frame_index:  # 存檔對話框被取消,留在原地
+            return
+        self.canvas.select(det_index)
+        if focused is not None:
+            focused.setFocus()
+
+        if len(hits) == 1:
+            note = "(整份資料集只出現這一次)"
+        elif wrapped:
+            note = "(已繞回開頭)" if step > 0 else "(已繞回結尾)"
+        else:
+            note = ""
+        self.statusBar().showMessage(
+            f"{what}  第 {pos + 1}/{len(hits)} 次出現  seq={self.frames[frame_index].seq}"
+            f"{note}",
+            6000,
+        )
 
     def _prefetch_around(self, index: int) -> None:
         lo = max(0, index - PREFETCH_RADIUS)
@@ -815,6 +969,8 @@ class MainWindow(QMainWindow):
         self.act_interp.setEnabled(has_data)
         self.act_remap.setEnabled(has_data)
         self.act_bulk_undo.setEnabled(bool(self._last_bulk))
+        for action in (self.act_find, self.act_find_next, self.act_find_prev):
+            action.setEnabled(has_data)
 
     def _refresh_status(self) -> None:
         if not (0 <= self.index < len(self.frames)):

@@ -323,6 +323,30 @@ def plan_remap(frames: list[FrameLabel], label: str, old_id: int, new_id: int) -
     return result
 
 
+def find_track(
+    frames: list[FrameLabel], label: str | None, track_id: int
+) -> list[tuple[int, int]]:
+    """依幀序列出某條軌跡的每一次出現,回傳 ``(frame index, det index)``。
+
+    ``label`` 給字串就限定該 label,``None`` 代表不分 label。預設應該指定:軌跡身分
+    是 ``(label, track_id)``,理由同 :func:`interpolate_missing`——person#7 與
+    drone#7 是兩條不同軌跡,混在一起追會在兩條線之間來回跳。留 ``None`` 是給
+    「不確定號碼掛在哪個 label」時掃一遍用的。
+
+    同一幀有多個同號框時**每個都列一筆**,不合併:那正是 ``has_duplicate_track``
+    要人回頭看的狀況,搜尋逐個停下來才看得到第二個框在哪。
+
+    每次呼叫重掃而不快取:dets 隨時在編輯(改號、補框、刪框),快取一定會跟不上,
+    而掃一趟只是幾萬次欄位比對。
+    """
+    return [
+        (i, k)
+        for i, frame in enumerate(frames)
+        for k, det in enumerate(frame.dets)
+        if det.track_id == track_id and (label is None or det.label == label)
+    ]
+
+
 class UndoStack:
     """整份 dets 的快照式 undo/redo。
 
