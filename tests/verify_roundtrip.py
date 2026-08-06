@@ -1,6 +1,6 @@
 """驗收:存檔往返不漂移、非 dets 欄位一字未動、座標換算可逆。
 
-    uv run --project D:\\ws\\gt_labeling python scripts/verify_roundtrip.py <gt_sample_root>
+    uv run --project D:\\ws\\gt_labeling python tests/verify_roundtrip.py <gt_sample_root>
 """
 
 from __future__ import annotations

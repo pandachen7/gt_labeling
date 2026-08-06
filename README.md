@@ -246,8 +246,8 @@ tracker 常在目標離場後還吐一串幽靈框,或某一段被誤配到別�
 兩支腳本都要指向一份真實的資料夾(含 `frames/` 與 `labels/`),省略則用內建預設:
 
 ```
-uv run --project D:\ws\gt_labeling python scripts/verify_roundtrip.py <gt_root>
-uv run --project D:\ws\gt_labeling python scripts/verify_gui.py <gt_root>
+uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py <gt_root>
+uv run --project D:\ws\gt_labeling python tests/verify_gui.py <gt_root>
 ```
 
 預設指向 `D:\ws\detect_stream\out\gt_per_frames_0625_145125\000-020s`。那份 per-frame GT 按 `000-020s` 這樣分段,**每段自成一個 root**,要驗別段就把路徑帶上去。
@@ -256,8 +256,8 @@ uv run --project D:\ws\gt_labeling python scripts/verify_gui.py <gt_root>
 
 斷言一律**比相對變化量**,不寫死幀數、框數或重疊數 —— 換一份資料集就報假 FAIL 的驗收沒有價值。
 
-- [scripts/verify_roundtrip.py](scripts/verify_roundtrip.py):存檔往返不漂移、非 dets 欄位一字未動、座標換算可逆。
-- [scripts/verify_gui.py](scripts/verify_gui.py):offscreen 跑真的 GUI —— 真的開資料夾、真的用滑鼠事件改框、真的存檔再開一次比對。
+- [tests/verify_roundtrip.py](tests/verify_roundtrip.py):存檔往返不漂移、非 dets 欄位一字未動、座標換算可逆。
+- [tests/verify_gui.py](tests/verify_gui.py):offscreen 跑真的 GUI —— 真的開資料夾、真的用滑鼠事件改框、真的存檔再開一次比對。
 
 ## 專案結構
 

@@ -1,6 +1,6 @@
 """驗收(GUI 層,offscreen):真的開資料夾、真的用滑鼠事件改框、真的存檔再開一次比對。
 
-    uv run --project D:\\ws\\gt_labeling python scripts/verify_gui.py <gt_root>
+    uv run --project D:\\ws\\gt_labeling python tests/verify_gui.py <gt_root>
 
 <gt_root> 是含 ``frames/`` 與 ``labels/`` 的單一資料夾。預設指向 per-frame GT 的
 第一個時段;那份 GT 按 ``000-020s`` 這樣分段,每段自成一個 root,要驗別段就把
