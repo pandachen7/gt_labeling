@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
@@ -9,15 +11,15 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
     QRadioButton,
     QSpinBox,
     QVBoxLayout,
@@ -77,64 +79,6 @@ class FrameListPanel(QWidget):
         layout.addWidget(QLabel("幀清單  seq  框數  待補  重疊  未存"))
         layout.addWidget(self.list, 1)
         layout.addWidget(self.summary)
-        layout.addWidget(self._build_target_box())
-
-    def _build_target_box(self) -> QWidget:
-        """「要刪哪一條」的顯性入口。
-
-        擺在清單正下方而不是靠隱性記憶,是因為「刪哪一條 × 哪些幀」是兩個獨立
-        選擇,而幀已經有很好的 UI(清單多選),軌跡卻沒有——只靠「最後點過的框」
-        的話,人在按下 Delete 之前完全看不到目標是誰。
-
-        更要命的是順序:選好範圍後想改目標,得跑去畫布點框,而**點回清單就會把
-        剛拉好的範圍清光**(ExtendedSelection 的標準行為,實測點一列只剩那一列)。
-        所以目標必須能就地修改,不必離開清單;按鈕也必須存在,因為改完號碼焦點
-        在輸入框上,那時 Delete 鍵不會落在清單身上。
-        """
-        self.target_kind = QComboBox(self)
-        self.target_kind.addItems(LABELS)
-        self.target_kind.setFixedWidth(80)
-
-        self.target_edit = QLineEdit(self)
-        self.target_edit.setValidator(QIntValidator(0, 2_000_000_000, self))
-        self.target_edit.setPlaceholderText("track_id")
-        # Enter 等同按下按鈕:改完號碼最自然的下一個動作就是執行。
-        self.target_edit.returnPressed.connect(lambda: self.deleteRequested.emit())
-
-        self.delete_button = QPushButton("刪掉選取幀內的這條軌跡", self)
-        self.delete_button.setToolTip(
-            "把上面指定的軌跡,在幀清單選取的那幾幀裡整段刪掉。\n"
-            "點畫布上的框會自動填進來,也可以直接改號碼。")
-        self.delete_button.clicked.connect(lambda: self.deleteRequested.emit())
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel("目標", self))
-        row.addWidget(self.target_kind)
-        row.addWidget(self.target_edit, 1)
-
-        box = QVBoxLayout()
-        box.addLayout(row)
-        box.addWidget(self.delete_button)
-
-        group = QGroupBox("Delete 刪除軌跡", self)
-        group.setLayout(box)
-        return group
-
-    def set_delete_target(self, label: str, track_id: int) -> None:
-        """把目標設成某條軌跡(點框時由主視窗餵進來)。"""
-        index = self.target_kind.findText(label)
-        if index >= 0:
-            self.target_kind.setCurrentIndex(index)
-        self.target_edit.setText(str(track_id))
-
-    def clear_delete_target(self) -> None:
-        self.target_edit.clear()
-
-    def delete_target(self) -> tuple[str, int] | None:
-        """目前指定的軌跡;號碼空白代表還沒指定。"""
-        text = self.target_edit.text().strip()
-        return (self.target_kind.currentText(), int(text)) if text else None
 
     def set_frames(self, frames: list[FrameLabel]) -> None:
         self._syncing = True
@@ -200,6 +144,88 @@ class FrameListPanel(QWidget):
     def _on_row_changed(self, row: int) -> None:
         if not self._syncing and row >= 0:
             self.rowSelected.emit(row)
+
+
+class DeleteTrackDialog(QDialog):
+    """刪掉一條軌跡在選取幀範圍內的所有框。
+
+    做成對話框而不是常駐面板:這是偶爾才做一次的破壞性操作,常駐在幀清單下方
+    只會一直佔著左欄的高度與寬度,而右欄那疊面板已經證明過「面板越疊越高」會
+    把視窗頂大到超出螢幕。
+
+    「刪哪一條」與「影響多大」擺在同一個視窗裡即時連動:改一次號碼就重算一次
+    命中數,按鈕上直接寫出要刪幾個框。這樣不必先猜再看確認視窗,也不會出現
+    「畫面寫 #7、實際刪 #3」——送出去的就是畫面上這一組值。
+    """
+
+    def __init__(
+        self,
+        scope: str,
+        preview: Callable[[str, int], tuple[int, str]],
+        initial: tuple[str, int] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("刪除軌跡片段")
+        self._preview = preview
+
+        self.kind_box = QComboBox(self)
+        self.kind_box.addItems(LABELS)
+        self.kind_box.currentIndexChanged.connect(lambda _: self._refresh())
+
+        self.track_edit = QLineEdit(self)
+        self.track_edit.setValidator(QIntValidator(0, 2_000_000_000, self))
+        self.track_edit.setPlaceholderText("track_id")
+        self.track_edit.textChanged.connect(lambda _: self._refresh())
+
+        self.detail = QLabel("", self)
+        self.detail.setWordWrap(True)
+        self.detail.setMinimumWidth(320)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        form = QFormLayout()
+        form.addRow(QLabel(scope, self))
+        form.addRow("label", self.kind_box)
+        form.addRow("track_id", self.track_edit)
+        form.addRow(self.detail)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self.buttons)
+
+        if initial is not None:
+            label, track_id = initial
+            index = self.kind_box.findText(label)
+            if index >= 0:
+                self.kind_box.setCurrentIndex(index)
+            self.track_edit.setText(str(track_id))
+        self._refresh()
+        self.track_edit.setFocus()
+        self.track_edit.selectAll()
+
+    def _refresh(self) -> None:
+        """號碼一改就重算影響範圍,沒有命中就不讓按下去。"""
+        target = self.target()
+        if target is None:
+            self.detail.setText("填一個 track_id。")
+            count, ok_text = 0, "刪除"
+        else:
+            count, summary = self._preview(*target)
+            self.detail.setText(summary)
+            ok_text = f"刪除 {count} 個框" if count else "刪除"
+        ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setText(ok_text)
+        ok.setEnabled(count > 0)
+
+    def target(self) -> tuple[str, int] | None:
+        text = self.track_edit.text().strip()
+        return (self.kind_box.currentText(), int(text)) if text else None
 
 
 class NewDetPanel(QWidget):

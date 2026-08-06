@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PyQt6.QtCore import QPoint, QSettings, Qt, QTimer
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QAbstractItemView, QApplication
+from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox
 
 from gt_labeling.canvas import COLOR_DRONE, det_color
 from gt_labeling.model import (
@@ -107,6 +107,31 @@ def catch_modal(store: list[tuple[str, str]]) -> None:
             return
         store.append((dialog.windowTitle(), getattr(dialog, "text", lambda: "")()))
         dialog.accept()
+
+    QTimer.singleShot(0, grab)
+
+
+def catch_dialog(store: list, accept: bool = False) -> None:
+    """抓下一個跳出來的 modal 對話框,把**物件本身**記下來再關掉。
+
+    與 ``catch_modal`` 的差別在存什麼:自訂對話框(DeleteTrackDialog)要驗的是
+    裡面的欄位值與按鈕狀態,不是一句 text()。物件的 parent 是主視窗,關掉之後
+    仍然活著,所以關完再檢查沒問題。
+
+    ``accept=True`` 走「按下確定」那條路。QDialog.accept() 讓 exec() 回傳
+    Accepted,與真的點下按鈕同一條路——這點與 QMessageBox 不同(那邊 accept()
+    回傳的不是 StandardButton,等同取消)。
+    """
+
+    def grab() -> None:
+        dialog = QApplication.activeModalWidget()
+        if dialog is None:
+            return
+        store.append(dialog)
+        if accept:
+            dialog.accept()
+        else:
+            dialog.reject()
 
     QTimer.singleShot(0, grab)
 
@@ -200,6 +225,31 @@ def main() -> int:
         repaint = (time.perf_counter() - t0) / 30
         print(f"       重繪平均 {repaint * 1000:.1f} ms(不重新解碼 JPEG)")
         check(repaint < 0.050, f"重繪 < 50ms(實際 {repaint * 1000:.1f} ms)")
+
+        section("視窗尺寸不被面板內容左右")
+        # QMainWindow 會在 minimumSizeHint 超過當前尺寸時自己把視窗頂大,而且只長
+        # 不縮。右側面板的最小高度若直接往上傳,選一個框(det_panel 要多顯示三行
+        # bbox 座標)就會把視窗撐高、底部推出螢幕 —— 在高 DPI 縮放下必然發生,
+        # 而使用者調好的視窗大小不該被「現在顯示了什麼」決定。
+        window.resize(1280, 760)
+        app.processEvents()
+        size_before = (window.width(), window.height())
+        hint_before = window.minimumSizeHint()
+        probe_frame = window.frames[window.index]
+        for k in range(min(6, len(probe_frame.dets))):
+            canvas.select(k)
+            app.processEvents()
+        canvas.select(-1)
+        app.processEvents()
+        check((window.width(), window.height()) == size_before,
+              f"連選 6 個框後視窗尺寸不變(實際 {size_before} -> "
+              f"{(window.width(), window.height())})")
+        check(window.minimumSizeHint() == hint_before,
+              f"視窗最小尺寸也不隨內容變({hint_before} -> {window.minimumSizeHint()})")
+        # 最小高度要能塞進小螢幕:150% DPI 縮放的 1080p 邏輯高度只有 720。
+        check(window.minimumSizeHint().height() <= 720,
+              f"視窗最小高度 {window.minimumSizeHint().height()} <= 720,"
+              f"高 DPI 螢幕塞得下")
 
         section("Home / End 跳首末幀")
         window._goto(len(window.frames) // 2)
@@ -613,7 +663,15 @@ def main() -> int:
                   for action in frame_list.actions()),
               "Delete 綁在幀清單本身,不搶畫布的「刪掉這一個框」")
 
-        # 前置不足的兩條路都要說明原因而非靜默不動:入口只有一顆 Delete 鍵。
+        check(window.act_delete_track in window.menuBar().actions()[1].menu().actions(),
+              "「刪除選取幀內的軌跡…」收在「編輯」選單裡")
+        check(window.act_delete_track.shortcut() == QKeySequence("Ctrl+Shift+D"),
+              f"快捷鍵 Ctrl+Shift+D(實際 {window.act_delete_track.shortcut().toString()})")
+        check(window.list_panel.minimumSizeHint().height() < 300,
+              f"左欄沒有被常駐面板墊高(minHint 高 "
+              f"{window.list_panel.minimumSizeHint().height()})")
+
+        # 沒選幀就不該跳對話框,而且要說明原因而非靜默不動。
         frame_list.clearSelection()
         counts_before = [len(f.dets) for f in window.frames]
         window._delete_track_range()
@@ -623,39 +681,17 @@ def main() -> int:
         check("幀清單" in window.statusBar().currentMessage(),
               f"且有說明原因:{window.statusBar().currentMessage()!r}")
 
-        window.list_panel.clear_delete_target()
-        frame_list.setCurrentRow(rows[0])
-        window._delete_track_range()
-        app.processEvents()
-        check([len(f.dets) for f in window.frames] == counts_before,
-              "沒指定要刪哪一條時不動資料")
-        check("先決定要刪哪一條" in window.statusBar().currentMessage(),
-              f"且有說明原因:{window.statusBar().currentMessage()!r}")
-        check(window.list_panel.target_edit.hasFocus(),
-              "並把游標送到目標欄,人不必自己去找那一格在哪")
-
-        # 目標是畫面上看得到的那一格,不是藏在後面的影子狀態 —— 點框自動填進去。
+        # 最後點過的框只是對話框的**預填值**,不是背後偷偷送出去的執行參數。
         window._goto(rows[0])
         canvas.select(next(k for k, d in enumerate(window.frames[rows[0]].dets)
                            if on_track(d)))
         app.processEvents()
-        check(window.list_panel.delete_target() == (probe_label, probe_tid),
-              f"點框後目標填成 {probe_label} #{probe_tid}"
-              f"(實際 {window.list_panel.delete_target()})")
-        check(window.list_panel.target_edit.text() == str(probe_tid),
-              f"而且是寫在畫面上看得到的欄位裡:{window.list_panel.target_edit.text()!r}")
+        check(window._last_track == (probe_label, probe_tid),
+              f"點框後記住 {probe_label} #{probe_tid}(實際 {window._last_track})")
         window._goto(rows[-1])
         app.processEvents()
         check(canvas.selected_det is None, "切幀後畫布選取被清掉(所以問不到目標)")
-        check(window.list_panel.delete_target() == (probe_label, probe_tid),
-              "但目標欄跨幀存活")
-
-        # 就地改號:選好範圍後想換目標,不必回畫布點框 —— 那條路會逼人重選範圍,
-        # 因為點回清單會把拉好的範圍清光(ExtendedSelection 的標準行為)。
-        window.list_panel.target_edit.setText("999999")
-        check(window.list_panel.delete_target() == (probe_label, 999999),
-              f"直接打號碼就換目標(實際 {window.list_panel.delete_target()})")
-        window.list_panel.set_delete_target(probe_label, probe_tid)
+        check(window._last_track == (probe_label, probe_tid), "但記住的軌跡跨幀存活")
 
         # 真的用 Shift+↓ 拉範圍,不是直接呼叫 API 設選取 —— 要驗的正是這條路。
         # 拉幾列要設上限:每按一次就切一幀、跟著解一張 3840x1920 的 JPEG,而
@@ -709,31 +745,52 @@ def main() -> int:
         check(all(d is not ghost for _, d in plan.targets),
               f"同號的 {other_label} #{probe_tid} 不在刪除清單")
 
-        # catch_modal 是 accept() 關掉對話框,不是點下「確定」按鈕 —— QMessageBox
-        # 這樣關回傳的不是 StandardButton.Ok,所以這一輪等同取消,資料必須原封不動。
+        # 取消那條路:對話框跳出來、內容對,按取消就什麼都不動。
         counts_now = [len(f.dets) for f in window.frames]
-        asked: list[tuple[str, str]] = []
-        catch_modal(asked)
+        opened: list = []
+        catch_dialog(opened)
         QTest.keyClick(frame_list, Qt.Key.Key_Delete)
         app.processEvents()
-        check(len(asked) == 1 and asked[0][0] == "刪除軌跡片段",
-              f"按 Delete 彈出確認視窗(實際 {[t for t, _ in asked]})")
         # offscreen 平台關掉 modal 後不會把 active window 還給主視窗(activeWindow()
         # 變 None),而焦點與快捷鍵都只在 active window 裡成立 —— 不補這一下,後面
         # 每一段的按鍵測試都會靜默落空。這是測試環境的還原,不是產品行為。
         window.activateWindow()
         app.processEvents()
-        if asked:
-            check(f"{probe_label} #{probe_tid}" in asked[0][1]
-                  and f"{plan.box_count} 個框" in asked[0][1],
-                  f"視窗寫明刪的是誰、幾個框:{asked[0][1].splitlines()[0]!r}")
-            check(f"範圍外還有 {outside} 個框" in asked[0][1],
-                  "視窗寫明範圍外還留著多少(剩 0 代表整條消失,後果差很多)")
-        check([len(f.dets) for f in window.frames] == counts_now,
-              "沒按下「確定」就關掉對話框時不動資料")
+        check(len(opened) == 1 and opened[0].windowTitle() == "刪除軌跡片段",
+              f"在幀清單按 Delete 跳出對話框(實際 {[d.windowTitle() for d in opened]})")
+        if opened:
+            dialog = opened[0]
+            check(dialog.target() == (probe_label, probe_tid),
+                  f"預填最後點過的那條 {probe_label} #{probe_tid}"
+                  f"(實際 {dialog.target()})")
+            ok_button = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
+            check(f"{plan.box_count}" in ok_button.text(),
+                  f"按鈕上就寫著要刪幾個框:{ok_button.text()!r}")
+            check(f"命中 {len(doomed_rows)} 幀" in dialog.detail.text()
+                  and f"範圍外還有 {outside} 個框" in dialog.detail.text(),
+                  f"寫出命中多少、範圍外還留著多少:"
+                  f"{dialog.detail.text().replace(chr(10), ' | ')!r}")
 
-        window.apply_track_delete(plan, probe_label, probe_tid)
+            # 即時連動:改成一個沒人用的號碼,按鈕當場停用,不必先送出才知道白做。
+            nobody = max(d.track_id for f in window.frames for d in f.dets
+                         if d.track_id is not None) + 777
+            dialog.track_edit.setText(str(nobody))
+            app.processEvents()
+            check(not ok_button.isEnabled(),
+                  f"改成查無此人的 #{nobody} 後「確定」停用")
+            check("沒有" in dialog.detail.text(),
+                  f"並說明為什麼:{dialog.detail.text()!r}")
+        check([len(f.dets) for f in window.frames] == counts_now,
+              "按取消時不動資料")
+
+        # 確定那條路:走完整流程(對話框 accept)而不是直接呼叫 apply。
+        accepted: list = []
+        catch_dialog(accepted, accept=True)
+        QTest.keyClick(frame_list, Qt.Key.Key_Delete)
         app.processEvents()
+        window.activateWindow()
+        app.processEvents()
+        check(len(accepted) == 1, "第二次按 Delete 又跳出對話框")
         check(not any(on_track(d) for i in doomed_rows for d in window.frames[i].dets),
               f"選取範圍內的 {probe_label} #{probe_tid} 全部消失")
         check(all(any(on_track(d) for d in window.frames[i].dets) for i in kept_rows),
@@ -741,8 +798,8 @@ def main() -> int:
         check(any(d is ghost for d in window.frames[ghost_row].dets),
               f"同號的 {other_label} #{probe_tid} 沒被波及(認軌是 (label, track_id))")
         check(window.frames[ghost_row].dirty, "刪完該幀標記未存")
-        check(window.list_panel.delete_target() == (probe_label, probe_tid),
-              "刪完目標仍停在同一條(幽靈框常分好幾段,要能接著刪下一段)")
+        check(window._last_track == (probe_label, probe_tid),
+              "刪完預填值仍停在同一條(幽靈框常分好幾段,要能接著刪下一段)")
         check(canvas.hasFocus(), "刪完焦點交還畫布(接著就是看畫面確認,A / D 也還能翻)")
 
         window._undo_last_bulk()
@@ -750,28 +807,17 @@ def main() -> int:
         check(all(any(on_track(d) for d in window.frames[i].dets) for i in doomed_rows),
               "Ctrl+Shift+I 整組復原,刪掉的框全部回來")
 
-        # 按鈕入口:焦點在目標輸入框上(剛改完號碼的實際狀態)時 Delete 鍵不會
-        # 落在清單身上,沒有按鈕就等於做不下去。這裡連 modal 都不攔,驗的是
-        # 「按下去真的走到同一條路」——會彈出確認視窗就代表接上了。
-        window.list_panel.target_edit.setFocus()
+        # 選單入口:焦點不在幀清單時 Delete 鍵到不了清單,選單那條路必須也能開。
+        canvas.setFocus()
         app.processEvents()
-        check(not frame_list.hasFocus(), "焦點在目標輸入框上(Delete 鍵此時到不了清單)")
-        pressed: list[tuple[str, str]] = []
-        catch_modal(pressed)
-        window.list_panel.delete_button.click()
+        check(not frame_list.hasFocus(), "焦點在畫布上(Delete 鍵此時是刪單一個框)")
+        via_menu: list = []
+        catch_dialog(via_menu)
+        window.act_delete_track.trigger()
         app.processEvents()
-        check(len(pressed) == 1 and pressed[0][0] == "刪除軌跡片段",
-              f"按鈕照樣叫得出確認視窗(實際 {[t for t, _ in pressed]})")
-        window.activateWindow()
-        app.processEvents()
-
-        # 目標欄按 Enter 是第三個入口(改完號碼最自然的下一個動作)。
-        pressed.clear()
-        catch_modal(pressed)
-        window.list_panel.target_edit.returnPressed.emit()
-        app.processEvents()
-        check(len(pressed) == 1 and pressed[0][0] == "刪除軌跡片段",
-              f"目標欄按 Enter 也走同一條路(實際 {[t for t, _ in pressed]})")
+        check(len(via_menu) == 1 and via_menu[0].windowTitle() == "刪除軌跡片段",
+              f"從「編輯」選單也叫得出同一個對話框"
+              f"(實際 {[d.windowTitle() for d in via_menu]})")
         window.activateWindow()
         app.processEvents()
 
