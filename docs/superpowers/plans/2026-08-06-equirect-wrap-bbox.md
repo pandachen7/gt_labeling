@@ -15,7 +15,7 @@
 - **y 軸行為完全不變**:equirect 上下是極點、不是環狀鄰接。所有 clamp `[0,1]`、`_ensure_span` 的 y 分支原樣保留。
 - **`wrap=False` 時所有行為與改動前逐位元相同**。非 2:1 的資料不得受任何影響。
 - **驗收不得寫死資料量**:標註正在進行中,幀數/框數/跨縫框個數隨時在變。只斷言與資料量無關的性質。
-- **ruff line-length 100**,提交前必須 `uv run ruff check .` 通過。
+- **ruff line-length 100**,提交前跑 `uvx ruff check .`(**不是** `uv run ... ruff` —— ruff 不是本專案的依賴,那條指令會 `program not found`)。基準線是 **1 個既有錯誤**:`gt_labeling/model.py` 的 `interpolate_missing` 有 `RUF007`(`zip(anchors, anchors[1:])` 建議改 `itertools.pairwise()`)。要求是**不引入新的 ruff 錯誤**;那一個既有的不在本次範圍(手術式修改),不要順手改掉。
 - 每個 task 結束前跑 `uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py`,必須全部通過才 commit。
 - commit 訊息格式:`<type>(labeling): <繁中 subject,說為什麼>`,結尾加 `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`。
 
@@ -145,7 +145,7 @@ def canonical_bbox(bbox, wrap: bool = False) -> list[float]:
 
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 ```
 
 Expected: 「全部通過」,ruff 無錯。
@@ -353,7 +353,7 @@ class FrameLabel:
 
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 ```
 
 Expected: 「全部通過」。特別確認 `未編輯存檔:byte 完全相同` 與 `det 的未知欄位` 兩節仍全綠 —— 那份樣本(`0625_145125/000-020s`)是 3840x1920 但沒有跨縫框,所以自動進環景模式後輸出必須一模一樣。
@@ -381,12 +381,31 @@ EOF
 **Files:**
 
 - Modify: `gt_labeling/model.py:240-282`(`interpolate_missing`)
-- Test: `tests/verify_roundtrip.py`
+- Test: `tests/verify_roundtrip.py`、`tests/verify_gui.py`(見下方「連帶要修的既有斷言」)
 
 **Interfaces:**
 
 - Consumes: `canonical_bbox(bbox, wrap)`(Task 1)、`FrameLabel.wrap_x`(Task 2)
 - Produces: `interpolate_missing(frames, label, track_id, max_gap) -> Interpolation`(簽名不變,行為依 `frames[0].wrap_x` 改變)、模組級私有函式 `_wrap_align(target, reference) -> list[float]`
+
+**連帶要修的既有斷言(執行時發現,非原始計畫):**
+
+`tests/verify_gui.py` 的補框測試自己重算「逐座標線性內插 + `canonical_bbox` 不帶 wrap」當期望值。它的樣本是 3840x1920,`load_frame` 現在自動設 `wrap_x=True`,而那段用 `max_gap=100000` 放寬到極限、兩錨點相距 5 秒、中心 x 差超過半圈 —— `_wrap_align` 判定繞接縫更近而平移一圈,期望值就分歧了。
+
+**實作是對的,壞的是斷言**:它把「內插的數學」與「apply 有沒有把結果寫進去」混在一起,而數學那半是抄實作來的,實作一改就過時。改成直接取 `interpolate_missing` 的輸出當期望值,數學正確性交給 `verify_roundtrip.py` 的單元測試:
+
+```python
+        if len(filled) == len(hole):
+            # 期望值直接取 interpolate_missing 的輸出,驗的是「apply_interpolation 真的把
+            # 算出來的框寫進了對應的幀」——那才是這一層(GUI)該負責的事。
+            # 內插本身的數學正確性由 tests/verify_roundtrip.py 的單元測試負責,含環景下
+            # 走最短弧的案例;在這裡重算一遍等於把實作抄進測試,實作一改它就過時。
+            want = {i: det.bbox for i, det in loose.additions}
+            exact = all(filled[i].bbox == want[i] for i in hole)
+            check(exact, f"補回的每個 bbox 都等於 interpolate_missing 算出的值({len(hole)} 幀)")
+```
+
+**最短弧的固有限制(記錄,本次不加保護)**:兩錨點中心 x 相距超過半圈時,最短弧會補出繞過接縫的框,而人可能其實是直接走過去的。擋這件事的是 `max_gap` —— 預設 20 幀(約 0.67 秒)內,人不可能移動超過半個畫面寬(1920 px)。上游 `gt_densify.interp_box` 也只靠 `max_gap` 擋,不另外設保護,本工具與它一致。
 
 - [ ] **Step 1: 寫失敗測試**
 
@@ -452,7 +471,9 @@ def test_interpolate_wraps_shortest_arc() -> None:
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
 ```
 
-Expected: `FAIL 補出的框寬度仍是 0.03,沒有被拉長 [0.485, 0.5, 0.515, 0.7]` —— 中點跑到畫面中央,寬度看似正常但位置完全錯。
+Expected: `FAIL 中點落在接縫附近而不是畫面中央 0.50000`。
+
+命中的是**中點**那個斷言,不是寬度那個 —— 兩個錨點寬度相同(都是 0.03),逐座標線性內插碰巧把寬度保住了,錯的只有位置。這正是這個 bug 難發現的原因:框看起來大小正常,只是人被放到了畫面另一頭。
 
 - [ ] **Step 3: 實作**
 
@@ -508,7 +529,7 @@ def _wrap_align(target: list[float], reference: list[float]) -> list[float]:
 
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 ```
 
 Expected: 「全部通過」,含既有的 `補框:person#1 與 drone#1 不得互相干擾` 全綠。
@@ -543,7 +564,7 @@ EOF
 - Consumes: 無
 - Produces:
   - `ViewTransform.wrap_x: bool`(dataclass 欄位,預設 `False`)
-  - `ViewTransform.visible_shifts(view_w: float) -> range` —— 與視窗相交的整數圈編號。非環繞恆回 `range(0, 1)`。
+  - `ViewTransform.visible_shifts(view_w: float) -> range` —— 與視窗相交的整數圈編號。非環繞恆回 `range(1)`。
   - `clamp_offset(view)` 在 `wrap_x` 時對 x 取模而非夾住
 
 - [ ] **Step 1: 寫失敗測試**
@@ -582,7 +603,9 @@ def test_transform_wrap() -> None:
     flat.off_x = 999.0
     check(list(flat.visible_shifts(1600.0)) == [0], "非環繞恆回 1 份")
     flat.clamp_offset(QSize(1600, 900))
-    check(flat.off_x == 300.0,
+    # 要 round:zoom = 1000.0/3840.0 讓 span_x 變成 1000.0000000000001,置中算出
+    # 299.99999999999994。那是這幾個數字的浮點產物,與被測程式碼無關。
+    check(round(flat.off_x, 6) == 300.0,
           f"非環繞、影像比視窗小 → 置中到 300(既有行為,實際 {flat.off_x})")
 
     # 環繞下 pan 不被夾住,只被取模;取模後畫面內容不變(靠補圈)
@@ -647,14 +670,15 @@ class ViewTransform:
 
 ```python
     def visible_shifts(self, view_w: float) -> range:
-        """x 環繞時,與視窗相交的整數圈編號;非環繞恆為 ``range(0, 1)``。
+        """x 環繞時,與視窗相交的整數圈編號;非環繞恆為 ``range(1)``。
 
         第 k 圈的影像佔 widget 的 ``[off_x + k*span_x, off_x + (k+1)*span_x]``。
         繪製與 hit-test 都經由這裡取圈數,環繞語意因此只有一個出處 —— 與「座標
         換算只在 ViewTransform」的既有不變量同一個理由。
         """
+        # range(1) 而非 range(0, 1):ruff 的 PIE808 擋多餘的 start 參數。
         if not self.wrap_x or self.span_x <= 0.0:
-            return range(0, 1)
+            return range(1)
         k_min = math.floor(-self.off_x / self.span_x - 1.0) + 1
         k_max = math.ceil((view_w - self.off_x) / self.span_x) - 1
         return range(k_min, k_max + 1)
@@ -688,7 +712,7 @@ class ViewTransform:
 
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 ```
 
 Expected: 「全部通過」,含既有的 `ViewTransform 可逆性(座標漂移防線)` 全綠。
@@ -793,11 +817,14 @@ def test_canvas_wrap_geometry() -> None:
               f"(預期 index {seam_det},實際 {canvas.selected_index})")
         del window.frames[window.index].dets[seam_det]
         canvas.reload_dets()
-        canvas.tf.wrap_x = False
+        # 收尾以 model 為準恢復檢視狀態,**不要**寫死 False:Task 6 之後 3840x1920
+        # 會自動進環景,寫死 False 會讓後續區段的環景斷言假 FAIL。
+        canvas.tf.wrap_x = window.frames[window.index].wrap_x
+        canvas.tf.clamp_offset(canvas.size())
         app.processEvents()
 ```
 
-`verify_gui.py` 需要 `Det`、`QTest`、`QPoint`、`Qt` —— 前三者確認 import 區已有(`drag()` 與 `find_empty_spot()` 都用到 `QTest` / `QPoint` / `Qt`);`Det` 若尚未匯入,在 `from gt_labeling.model import ...` 那行補上。
+`verify_gui.py` 需要 `Det`、`QTest`、`QPoint`、`Qt` —— 後三者確認 import 區已有(`drag()` 與 `find_empty_spot()` 都用到);`Det` 若尚未匯入,在 `from gt_labeling.model import ...` 那行補上。
 
 - [ ] **Step 2: 跑測試確認失敗**
 
@@ -1096,7 +1123,7 @@ def _clamp_y_only(p: QPointF) -> QPointF:
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
 uv run --project D:\ws\gt_labeling python tests/verify_gui.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 ```
 
 Expected: 兩支都「全部通過」,含 Step 1b 那個先前 FAIL 的 hit-test 斷言。
@@ -1247,7 +1274,7 @@ EOF
 
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 uv run --project D:\ws\gt_labeling python main.py
 ```
 
@@ -1390,7 +1417,7 @@ COLOR_NORMAL = QColor("#dcdcdc")
 
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 uv run --project D:\ws\gt_labeling python main.py
 ```
 
@@ -1541,7 +1568,7 @@ git stash pop
 
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 ```
 
 Expected: 「全部通過」,含 `這份樣本含跨縫框可供回歸(實際 172 個)`。
@@ -1578,7 +1605,7 @@ EOF
 
 - [ ] **Step 1: GUI 環景區段**
 
-在 `tests/verify_gui.py` 的 `main()` 裡,`section("開資料夾")` 那一段的檢查之後(第 194 行 `"首幀尺寸 3840x1920"` 之後)插入:
+在 `tests/verify_gui.py` 的 `main()` 裡,**Task 5 新增的 `section("環景 hit-test:接縫另一側點得到同一個框")` 那一整段之後**插入(不是插在 `section("開資料夾")` 之後 —— Task 5 已經佔了那個位置,插錯會讓兩段的檢視狀態互相打斷):
 
 ```python
         section("環景模式")
@@ -1651,6 +1678,26 @@ EOF
 ```
 
 `QPoint` / `QTest` / `Qt` 已在 verify_gui.py 匯入;`Det` 若尚未匯入,在 `from gt_labeling.model import ...` 那行補上(Task 5 Step 1b 可能已經補過)。
+
+**同時修掉 `tests/verify_gui.py:497` 那個既有斷言**(Task 2 的 review 抓到的缺口):
+
+```python
+        check(all(0.0 <= v <= 1.0 for d in reopened.dets_json() for v in d["bbox"]),
+              "重開後 bbox 仍在 [0,1]")
+```
+
+環景模式下跨縫框的 `x2` 本來就該越過 1.0,這條會在資料集出現真正的跨縫框時假 FAIL。換成與 `verify_roundtrip.test_edit_roundtrip` 同一套判準:
+
+```python
+        wrap = reopened.wrap_x
+        check(all(0.0 <= d["bbox"][0] < 1.0 for d in reopened.dets_json()),
+              f"重開後 x1 都在 [0,1)(環景={wrap})")
+        check(all(0.0 <= d["bbox"][1] <= 1.0 and 0.0 <= d["bbox"][3] <= 1.0
+                  for d in reopened.dets_json()),
+              "重開後 y 都在 [0,1]")
+```
+
+行號以實際檔案為準(前面幾個 task 已經動過這支檔案,497 會位移);用 `all(0.0 <= v <= 1.0 for d in reopened.dets_json()` 這段字串去找。
 
 - [ ] **Step 2: 跑 GUI 驗收**
 
@@ -1762,7 +1809,7 @@ Expected: 全部通過,或印出 `skip`(detect_stream 不在預期位置時)。�
 ```bash
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
 uv run --project D:\ws\gt_labeling python tests/verify_gui.py
-uv run --project D:\ws\gt_labeling ruff check .
+uvx ruff check .
 ```
 
 Expected: 兩支都「全部通過」,ruff 無錯。
@@ -1797,4 +1844,4 @@ EOF
       `uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py D:\ws\detect_stream\out\gt_per_frames_0626_135335\000-020s`
       (掃描當下該資料集 0 個跨縫框、0 個貼邊,是驗這件事的乾淨對照組)
 - [ ] `uv run --project D:\ws\gt_labeling python tests/verify_gui.py` 全綠
-- [ ] `uv run --project D:\ws\gt_labeling ruff check .` 無錯
+- [ ] `uvx ruff check .` 無錯
