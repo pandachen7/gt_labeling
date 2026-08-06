@@ -31,6 +31,8 @@ from gt_labeling.window import MainWindow
 
 FAILURES: list[str] = []
 OUT_DIR = Path(__file__).resolve().parents[1] / "out"
+# 逐幀瀏覽最多走幾幀(夠測解碼成本就好,不必走完整份資料集)。
+WALK_FRAMES = 74
 
 
 def box_iou(a, b) -> float:
@@ -120,8 +122,13 @@ def main() -> int:
         app.processEvents()
 
         section("開資料夾")
+        # 要驗的是「掃描沒漏檔」,拿磁碟上的 json 檔數當期望值;寫死幀數會綁死
+        # 特定樣本,換一份資料就報出與程式無關的假 FAIL。
+        expected_frames = len(list((work / "labels").glob("*.json")))
         check(window.open_root(work), "open_root 成功")
-        check(len(window.frames) == 75, f"載入 75 幀(實際 {len(window.frames)})")
+        check(len(window.frames) == expected_frames,
+              f"labels 有 {expected_frames} 個 json 就載入 {expected_frames} 幀"
+              f"(實際 {len(window.frames)})")
         canvas = window.canvas
         app.processEvents()
         check(canvas.width() > 400 and canvas.height() > 300,
@@ -129,18 +136,21 @@ def main() -> int:
         check(canvas.frame is not None and canvas.frame.size == (3840, 1920),
               "首幀尺寸 3840x1920")
 
-        section("逐幀瀏覽 75 幀")
+        # 逐幀瀏覽測的是每幀解碼成本,走幾幀夠了就好;整份 600 幀走完只是把
+        # 同一件事重複八次,徒增驗收時間。
+        walk = min(WALK_FRAMES, len(window.frames) - 1)
+        section(f"逐幀瀏覽 {walk + 1} 幀")
         t0 = time.perf_counter()
         visited = 0
-        for _ in range(74):
+        for _ in range(walk):
             window._navigate(1)
             app.processEvents()
             visited += 1
         first_pass = time.perf_counter() - t0
-        check(window.index == 74, f"走到最後一幀(index={window.index})")
-        check(visited == 74, "74 次前進全部成功")
+        check(window.index == walk, f"連續前進到 index {walk}(實際 {window.index})")
+        check(visited == walk, f"{walk} 次前進全部成功")
         print(f"       首輪(含 JPEG 解碼)共 {first_pass * 1000:.0f} ms,"
-              f"平均 {first_pass / 74 * 1000:.1f} ms/幀")
+              f"平均 {first_pass / walk * 1000:.1f} ms/幀")
 
         # 快取命中路徑:在小範圍來回切,不應再解碼。
         window._goto(40)
@@ -327,9 +337,13 @@ def main() -> int:
         baseline = frame.dets_json()
         canvas.select(0)
         for i in range(25):
-            frame.dets[0].bbox = [
-                min(max(v + 0.0007 * (i + 1), 0.0), 1.0) for v in frame.dets[0].bbox
-            ]
+            # 每步都給一個唯一、且不貼邊的框。不能用「往右下累加」:累加的基礎是
+            # 上一步 clamp 後的值,框會被推到 [1,1,1,1] 飽和,之後的編輯不再改變
+            # 狀態,而 UndoStack 對「狀態沒變」依設計不記一筆(commit 回 False),
+            # 25 次編輯只留 24 筆歷史,25 次 undo 就退過頭一步。飽和發生在第幾步
+            # 取決於框原本離邊界多遠,所以那種寫法會隨資料集翻臉。
+            span = 0.10 + 0.001 * i
+            frame.dets[0].bbox = [0.20, 0.20, 0.20 + span, 0.20 + span]
             canvas.detsEdited.emit()
         app.processEvents()
         after_edits = frame.dets_json()

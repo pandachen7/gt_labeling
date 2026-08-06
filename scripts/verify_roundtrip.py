@@ -49,7 +49,11 @@ def non_dets(raw: dict) -> list[tuple[str, object]]:
 def test_unchanged_save_is_byte_identical(root: Path) -> None:
     section("未編輯存檔:byte 完全相同")
     entries = scan_root(root)
-    check(len(entries) == 75, f"掃到 75 幀(實際 {len(entries)})")
+    # 期望值取自磁碟上的 json 檔數:寫死幀數會綁死特定樣本,換一份資料就報出
+    # 與程式無關的假 FAIL,反而蓋掉真正的失敗。
+    expected = len(list((root / "labels").glob("*.json")))
+    check(len(entries) == expected,
+          f"labels 有 {expected} 個 json 就掃到 {expected} 幀(實際 {len(entries)})")
 
     wrote = 0
     identical = 0

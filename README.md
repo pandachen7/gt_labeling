@@ -224,7 +224,7 @@ uv run --project D:\ws\gt_labeling python scripts/verify_gui.py <gt_sample_root>
 - **自繪 QWidget 而非 QGraphicsView**:正確性關鍵是 normalized 座標不漂移。自繪只有一組 `ViewTransform`(zoom + offset),滑鼠與繪製走同一條換算;QGraphicsView 會多出 item local / scene / view 三層座標與雙向同步,正是座標漂移的溫床。代價是 zoom/pan/hit-test 自己實作約 150 行。
 - **任何 normalized ↔ 螢幕換算都必須經由 `ViewTransform`**,不得在別處自行乘 `img_w * zoom` 或加 offset。
 - **快照式 undo 而非命令式**:dets 每幀只有數十個小物件,複製成本可忽略;拖曳縮放這類連續操作用命令物件很容易漏記反向狀態。undo 上限 60 筆,**每幀各自一份**。
-- **標註檔開啟時一次全部載入記憶體**(75 幀 × ~1KB)。清單能立刻顯示框數與待補狀態,關掉自動存時未存編輯也能跨幀保留。
+- **標註檔開啟時一次全部載入記憶體**(一幀約 1KB,逐幀資料的 600 幀也不到 1MB)。清單能立刻顯示框數與待補狀態,關掉自動存時未存編輯也能跨幀保留。
 - **影像解碼結果以 LRU 快取 QPixmap**,切幀後在背景執行緒預解碼前後各 2 幀(QImage 可跨執行緒,QPixmap 只能在 GUI 執行緒建立)。3840×1920 JPEG 解碼約數十毫秒,重繪不重新解碼。
 - **切幀時若影像尺寸相同就保留 zoom/pan**:逐幀比對同一區域是這工具的主要用法。
 
