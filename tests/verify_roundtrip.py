@@ -156,10 +156,19 @@ def test_edit_roundtrip(root: Path) -> None:
     )
 
     saved_raw = json.loads(target.label_path.read_bytes().decode("utf-8"))
-    all_normalized = all(
-        0.0 <= v <= 1.0 for d in saved_raw["dets"] for v in d["bbox"]
+    # 環景模式下 x2 可以越過 1.0(跨縫框的延伸表示),但 x1 必須落在 [0,1)、
+    # y 必須落在 [0,1]。寫成「x2 一律 <= 1」會在跨縫框上假 FAIL。
+    wrap = load_frame(target.label_path).wrap_x
+    x_ok = all(
+        0.0 <= d["bbox"][0] < 1.0 and (d["bbox"][2] <= 1.0 if not wrap else True)
+        for d in saved_raw["dets"]
     )
-    check(all_normalized, "存出的 bbox 全在 [0,1](仍是歸一化,不是像素)")
+    y_ok = all(
+        0.0 <= d["bbox"][1] <= 1.0 and 0.0 <= d["bbox"][3] <= 1.0
+        for d in saved_raw["dets"]
+    )
+    check(x_ok, f"存出的 x1 都在 [0,1)(環景={wrap})")
+    check(y_ok, "存出的 y 都在 [0,1]")
     five_dp = all(
         round(v, 5) == v for d in saved_raw["dets"] for v in d["bbox"]
     )
@@ -306,6 +315,39 @@ def test_canonical_bbox() -> None:
           "wrap 下 y 仍 clamp 到 [0,1]")
 
 
+def test_frame_wrap_state() -> None:
+    section("FrameLabel 的環景狀態")
+
+    def frame_with(size: list[int], bboxes: list[list[float]]) -> FrameLabel:
+        raw = {"type": "gt", "version": 1, "seq": 1, "size": size, "dets": []}
+        dets = [Det(label="person", track_id=1, ppe="ng", bbox=list(b)) for b in bboxes]
+        frame = FrameLabel(path=Path("000001.json"), raw=raw, dets=dets, style=TextStyle())
+        frame.wrap_x = frame.is_equirect
+        frame._clean = frame.dets_json()
+        return frame
+
+    erp = frame_with([3840, 1920], [[0.94063, 0.5, 1.00348, 0.7]])
+    check(erp.is_equirect, "3840x1920 判定為 equirect")
+    check(erp.wrap_x, "equirect 的 frame 預設進環景模式")
+    check(erp.dets_json()[0]["bbox"] == [0.94063, 0.5, 1.00348, 0.7],
+          f"環景下跨縫框存出去原樣保留 {erp.dets_json()[0]['bbox']}")
+    check(not erp.dirty, "跨縫框讀進來不會被誤判為已改")
+
+    flat = frame_with([1920, 1080], [[0.94063, 0.5, 1.00348, 0.7]])
+    check(not flat.is_equirect, "1920x1080 不是 equirect")
+    check(not flat.wrap_x, "非 equirect 的 frame 不進環景模式")
+    check(flat.dets_json()[0]["bbox"] == [0.94063, 0.5, 1.0, 0.7],
+          f"非環景下 x2 仍被 clamp 到 1.0(既有行為){flat.dets_json()[0]['bbox']}")
+
+    erp.wrap_x = False
+    check(erp.dirty, "手動關掉環景模式後,含跨縫框的 frame 被標成已改(存出去會不同)")
+
+    plain = frame_with([3840, 1920], [[0.3, 0.4, 0.5, 0.6]])
+    plain_json = plain.dets_json()
+    plain.wrap_x = False
+    check(plain.dets_json() == plain_json, "沒有跨縫框的 frame,切換模式輸出完全相同")
+
+
 def test_transform_roundtrip() -> None:
     section("ViewTransform 可逆性(座標漂移防線)")
     tf = ViewTransform()
@@ -372,6 +414,7 @@ def main() -> int:
 
     test_interpolate_is_per_label()
     test_canonical_bbox()
+    test_frame_wrap_state()
     test_transform_roundtrip()
 
     print("\n" + "=" * 60)

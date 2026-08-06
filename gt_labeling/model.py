@@ -99,14 +99,14 @@ class Det:
         """待補:track_id 未指定,或 person 的 ppe 未判定。"""
         return self.track_id is None or (self.is_person and self.ppe is None)
 
-    def to_json(self) -> dict:
+    def to_json(self, wrap: bool = False) -> dict:
         # 以原始 det 當底再覆寫:更新既有 key 不會改變 dict 的順序,所以連
         # key 排列都跟讀進來時一樣;上游多寫的欄位(src 等)也原封不動帶回去。
         out = dict(self.raw)
         out["label"] = self.label
         out["track_id"] = self.track_id
         out["ppe"] = self.ppe if self.is_person else None
-        out["bbox"] = canonical_bbox(self.bbox)
+        out["bbox"] = canonical_bbox(self.bbox, wrap)
         return out
 
     def display_text(self) -> str:
@@ -138,6 +138,9 @@ class FrameLabel:
     raw: dict
     dets: list[Det]
     style: TextStyle
+    # equirect 環景模式:x 以延伸表示落檔(見 canonical_bbox)。**不是** JSON 欄位,
+    # 是執行期狀態,由 load_frame 依 size 自動判定、由視窗的檢視選單覆寫。
+    wrap_x: bool = False
     _clean: list[dict] = field(default_factory=list, repr=False)
 
     # ------------------------------------------------------------------ 唯讀資訊
@@ -152,6 +155,20 @@ class FrameLabel:
         if not (isinstance(raw_size, (list, tuple)) and len(raw_size) == 2):
             raise ValueError(f"{self.path.name} 缺少合法的 size 欄位,無法換算 normalized 座標")
         return int(raw_size[0]), int(raw_size[1])
+
+    @property
+    def is_equirect(self) -> bool:
+        """寬高比 2:1 視為 equirectangular。
+
+        JSON 沒有、也不會加「這是 equirect」的欄位,size 是唯一線索。誤判成環景的
+        代價是讓人在 perspective 影像上畫出 x2>1 的框,而下游 wrap_iou 對非環狀來源
+        的 ±1 平移不會命中 —— 那種框會靜默算成 FN,所以判定寧可保守。
+        """
+        try:
+            width, height = self.size
+        except ValueError:
+            return False
+        return width == height * 2
 
     @property
     def dirty(self) -> bool:
@@ -190,10 +207,24 @@ class FrameLabel:
             seen.add(key)
         return False
 
+    @property
+    def has_edge_box(self) -> bool:
+        """有框恰好貼在 x=0 或 x=1 —— 環景下這幾乎一定是被 clamp 削過的痕跡。
+
+        用精確相等而非「接近」:clamp 產生的正是這兩個值,而 canonical 後所有座標
+        都是 round 到 5 位的十進位值,不存在差一點點的情況。``x2 > 1`` 是健康的跨縫
+        框,不算在內。
+
+        模式判斷寫在這裡而不是交給呼叫端:非 equirect 資料貼邊是正常的,恆回 False。
+        """
+        if not self.wrap_x:
+            return False
+        return any(d.bbox[0] == 0.0 or d.bbox[2] == 1.0 for d in self.dets)
+
     # ------------------------------------------------------------------ 序列化
 
     def dets_json(self) -> list[dict]:
-        return [d.to_json() for d in self.dets]
+        return [d.to_json(self.wrap_x) for d in self.dets]
 
     def save(self, force: bool = False) -> bool:
         """寫回原 JSON。沒改動就不動檔案(回傳 False)。"""
@@ -244,7 +275,9 @@ def load_frame(path: Path) -> FrameLabel:
         for d in raw.get("dets", [])
     ]
     frame = FrameLabel(path=path, raw=raw, dets=dets, style=style)
-    # 以「載入內容的 canonical 形式」當乾淨基準:沒編輯就不會被標成已改。
+    # 先定模式再算乾淨基準:_clean 是用 dets_json() 算的,而 dets_json() 的結果
+    # 取決於 wrap_x。順序反了的話,equirect 檔一開啟就會被標成已改。
+    frame.wrap_x = frame.is_equirect
     frame._clean = frame.dets_json()
     return frame
 
