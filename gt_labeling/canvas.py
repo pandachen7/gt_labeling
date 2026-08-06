@@ -52,6 +52,7 @@ COLOR_SELECT = QColor("#ffffff")
 COLOR_BAND = QColor("#4fa3ff")
 COLOR_OUTSIDE = QColor(0, 0, 0, 70)
 COLOR_IMAGE_EDGE = QColor("#3c3c3c")
+COLOR_SEAM = QColor(79, 163, 255, 90)
 
 HANDLE_CURSORS = {
     (-1, -1): Qt.CursorShape.SizeFDiagCursor,
@@ -85,6 +86,11 @@ def det_color(det: Det) -> QColor:
 
 def _clamp01(p: QPointF) -> QPointF:
     return QPointF(min(max(p.x(), 0.0), 1.0), min(max(p.y(), 0.0), 1.0))
+
+
+def _clamp_y_only(p: QPointF) -> QPointF:
+    """環景:x 可以越界(跨縫的表達方式),y 仍夾在畫面內(上下是極點)。"""
+    return QPointF(p.x(), min(max(p.y(), 0.0), 1.0))
 
 
 class ImageCanvas(QWidget):
@@ -159,6 +165,7 @@ class ImageCanvas(QWidget):
         if frame is not None:
             width, height = frame.size
             self.tf.set_image_size(width, height)
+            self.tf.wrap_x = frame.wrap_x
             # 影像尺寸相同就保留 zoom/pan:逐幀比對同一區域是這工具的主要用法。
             if prev_size != (width, height):
                 self._needs_fit = True
@@ -179,6 +186,15 @@ class ImageCanvas(QWidget):
 
     def set_band(self, lo: float | None, hi: float | None) -> None:
         self._band = None if lo is None or hi is None else (min(lo, hi), max(lo, hi))
+        self.update()
+
+    def set_wrap_x(self, enabled: bool) -> None:
+        """切換環景檢視。frame.wrap_x 由視窗負責設定,這裡只同步檢視與重繪。"""
+        if self.tf.wrap_x == enabled:
+            return
+        self.tf.wrap_x = enabled
+        self.tf.clamp_offset(self.size())
+        self.viewChanged.emit()
         self.update()
 
     def reload_dets(self) -> None:
@@ -212,6 +228,28 @@ class ImageCanvas(QWidget):
 
     # ------------------------------------------------------------------- 內部工具
 
+    def _wrap(self) -> bool:
+        """存檔語意以 model 為準:frame.wrap_x 決定 canonical 怎麼寫。"""
+        return self._frame is not None and self._frame.wrap_x
+
+    def _shifts(self) -> range:
+        """畫框/hit-test 要比 visible_shifts 多算左邊一圈。
+
+        visible_shifts 答的是「哪幾圈的整張影像跟視窗有交集」,對影像本身是對的
+        (影像每圈就是恰好一整圈,不會溢出)。但 canonical_bbox(wrap=True) 允許框寬
+        達到一整圈,x2 可以來到 x1+1.0——框在自己那一圈裡本來就可能跨進下一圈的
+        地盤。等視窗剛好塞滿一圈(貼齊 fit 到寬度時的預設檢視,off_x=0、
+        span_x=視窗寬,極常見)時,那一圈的鄰圈跟影像是零面積相交,被
+        visible_shifts 正確排除;但框溢出的那一段換算回螢幕,剛好落在視窗可見的
+        左緣——只算「影像可見的圈」會漏掉它,框就測不到、也畫不到左緣那一段。
+        往右溢出永遠不會反過來影響右邊(canonical 只允許 x2>1,不允許 x1<0),所以
+        只需要往左多補一圈,不必兩邊都補。
+        """
+        shifts = self.tf.visible_shifts(float(self.width()))
+        if not self.tf.wrap_x:
+            return shifts
+        return range(shifts.start - 1, shifts.stop)
+
     def _set_selection(self, index: int) -> None:
         index = index if index >= 0 else -1
         if index == self._sel:
@@ -237,11 +275,13 @@ class ImageCanvas(QWidget):
         det = self.selected_det
         if det is None:
             return None
-        rect = self.tf.n2v_rect(det.bbox)
-        for i, (hx, hy) in enumerate(HANDLES):
-            c = self._handle_center(rect, hx, hy)
-            if abs(pos.x() - c.x()) <= HANDLE_HIT and abs(pos.y() - c.y()) <= HANDLE_HIT:
-                return i
+        base = self.tf.n2v_rect(det.bbox)
+        for k in self._shifts():
+            rect = base.translated(k * self.tf.span_x, 0.0)
+            for i, (hx, hy) in enumerate(HANDLES):
+                c = self._handle_center(rect, hx, hy)
+                if abs(pos.x() - c.x()) <= HANDLE_HIT and abs(pos.y() - c.y()) <= HANDLE_HIT:
+                    return i
         return None
 
     def _hit_rect(self, bbox) -> QRectF:
@@ -257,8 +297,10 @@ class ImageCanvas(QWidget):
         # 已選取的優先(拖曳穩定),其餘由上層(繪製順序在後)往下找。
         order = [self._sel] if 0 <= self._sel < len(dets) else []
         order += range(len(dets) - 1, -1, -1)
+        shifts = list(self._shifts())
         for i in order:
-            if self._hit_rect(dets[i].bbox).contains(pos):
+            base = self._hit_rect(dets[i].bbox)
+            if any(base.translated(k * self.tf.span_x, 0.0).contains(pos) for k in shifts):
                 return i
         return None
 
@@ -278,8 +320,10 @@ class ImageCanvas(QWidget):
         dx = now.x() - self._drag_n0.x()
         dy = now.y() - self._drag_n0.y()
         x1, y1, x2, y2 = self._orig_bbox
-        # 整體平移不變形:位移量夾到框仍在 [0,1] 內。
-        dx = min(max(dx, -x1), 1.0 - x2)
+        # 整體平移不變形:位移量夾到框仍在 [0,1] 內。環景的 x 例外 —— 框本來就
+        # 該能走過接縫,夾住等於禁止跨縫。
+        if not self._wrap():
+            dx = min(max(dx, -x1), 1.0 - x2)
         dy = min(max(dy, -y1), 1.0 - y2)
         det.bbox = [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
         self.update()
@@ -293,11 +337,16 @@ class ImageCanvas(QWidget):
         dy = now.y() - self._drag_n0.y()
         hx, hy = HANDLES[self._handle]
         x1, y1, x2, y2 = self._orig_bbox
+        wrap = self._wrap()
         # 每次都從「拖曳起點的原始 bbox」重算,不累加,避免捨入誤差堆積。
         if hx < 0:
-            x1 = min(max(x1 + dx, 0.0), 1.0)
+            x1 = x1 + dx if wrap else min(max(x1 + dx, 0.0), 1.0)
+            if wrap and x2 - x1 > 1.0:      # 不許繞超過一整圈
+                x1 = x2 - 1.0
         elif hx > 0:
-            x2 = min(max(x2 + dx, 0.0), 1.0)
+            x2 = x2 + dx if wrap else min(max(x2 + dx, 0.0), 1.0)
+            if wrap and x2 - x1 > 1.0:
+                x2 = x1 + 1.0
         if hy < 0:
             y1 = min(max(y1 + dy, 0.0), 1.0)
         elif hy > 0:
@@ -368,7 +417,8 @@ class ImageCanvas(QWidget):
             return
 
         self._set_selection(-1)
-        start = _clamp01(self.tf.v2n_point(pos))
+        start = _clamp_y_only(self.tf.v2n_point(pos)) if self._wrap() \
+            else _clamp01(self.tf.v2n_point(pos))
         # 起手就決定屬性,拖曳中的虛線框才能顯示最終顏色(drone = 紅)。
         det = self.new_det_factory()
         det.bbox = [start.x(), start.y(), start.x(), start.y()]
@@ -394,7 +444,7 @@ class ImageCanvas(QWidget):
         elif self._mode is Mode.RESIZE:
             self._apply_resize(pos)
         elif self._mode is Mode.NEW and self._new_det is not None:
-            end = _clamp01(n)
+            end = _clamp_y_only(n) if self._wrap() else _clamp01(n)
             self._new_det.bbox[2] = end.x()
             self._new_det.bbox[3] = end.y()
             self.update()
@@ -414,7 +464,7 @@ class ImageCanvas(QWidget):
             if pending is not None and self._frame is not None:
                 rect = self.tf.n2v_rect(pending.bbox)
                 if rect.width() >= NEW_MIN_PX and rect.height() >= NEW_MIN_PX:
-                    pending.bbox = canonical_bbox(pending.bbox)
+                    pending.bbox = canonical_bbox(pending.bbox, self._wrap())
                     self._frame.dets.append(pending)
                     self._set_selection(len(self._frame.dets) - 1)
                     self.detsEdited.emit()
@@ -424,8 +474,9 @@ class ImageCanvas(QWidget):
         if mode in (Mode.MOVE, Mode.RESIZE):
             det = self.selected_det
             if det is not None:
-                det.bbox = canonical_bbox(det.bbox)
-                if det.bbox != canonical_bbox(self._orig_bbox):
+                wrap = self._wrap()
+                det.bbox = canonical_bbox(det.bbox, wrap)
+                if det.bbox != canonical_bbox(self._orig_bbox, wrap):
                     self.detsEdited.emit()
             self._update_cursor(pos)
             self.update()
@@ -480,8 +531,7 @@ class ImageCanvas(QWidget):
 
         image_rect = self.tf.image_rect()
         if self._pixmap is None or self._pixmap.isNull():
-            painter.setPen(QPen(COLOR_IMAGE_EDGE, 1))
-            painter.drawRect(image_rect)
+            self._draw_image_border(painter, image_rect)
             self._draw_hint(painter, "此幀找不到對應影像(frames/ 下無同 stem 檔案)")
         else:
             self._draw_image(painter, image_rect)
@@ -499,22 +549,43 @@ class ImageCanvas(QWidget):
 
     def _draw_image(self, painter: QPainter, image_rect: QRectF) -> None:
         assert self._pixmap is not None
-        if self.tf.zoom < 1.0:
-            painter.drawPixmap(image_rect.topLeft(), self._scaled_pixmap())
-        else:
-            visible = image_rect.intersected(QRectF(self.rect()))
-            if visible.isEmpty():
-                return
-            z = self.tf.zoom
-            source = QRectF(
-                (visible.left() - image_rect.left()) / z,
-                (visible.top() - image_rect.top()) / z,
-                visible.width() / z,
-                visible.height() / z,
-            )
-            painter.drawPixmap(visible, self._pixmap, source)
+        scaled = self._scaled_pixmap() if self.tf.zoom < 1.0 else None
+        for k in self._shifts():
+            rect = image_rect.translated(k * self.tf.span_x, 0.0)
+            if scaled is not None:
+                painter.drawPixmap(rect.topLeft(), scaled)
+            else:
+                visible = rect.intersected(QRectF(self.rect()))
+                if visible.isEmpty():
+                    continue
+                z = self.tf.zoom
+                source = QRectF(
+                    (visible.left() - rect.left()) / z,
+                    (visible.top() - rect.top()) / z,
+                    visible.width() / z,
+                    visible.height() / z,
+                )
+                painter.drawPixmap(visible, self._pixmap, source)
+        self._draw_image_border(painter, image_rect)
+
+    def _draw_image_border(self, painter: QPainter, image_rect: QRectF) -> None:
+        """非環景畫完整外框;環景只畫上下,左右改成接縫參考線。
+
+        環景下左右邊界不存在(那是同一條經線),畫成外框會讓人以為框不能越過去。
+        改成一條淡線標出 JSON 的 x=0/1 落在哪 —— 存檔的座標仍以它為原點。
+        """
         painter.setPen(QPen(COLOR_IMAGE_EDGE, 1))
-        painter.drawRect(image_rect)
+        if not self.tf.wrap_x:
+            painter.drawRect(image_rect)
+            return
+        left, right = float(self.rect().left()), float(self.rect().right())
+        painter.drawLine(QPointF(left, image_rect.top()), QPointF(right, image_rect.top()))
+        painter.drawLine(QPointF(left, image_rect.bottom()),
+                         QPointF(right, image_rect.bottom()))
+        painter.setPen(QPen(COLOR_SEAM, 1, Qt.PenStyle.DashLine))
+        for k in self._shifts():
+            x = image_rect.left() + k * self.tf.span_x
+            painter.drawLine(QPointF(x, image_rect.top()), QPointF(x, image_rect.bottom()))
 
     def _scaled_pixmap(self) -> QPixmap:
         assert self._pixmap is not None
@@ -538,35 +609,42 @@ class ImageCanvas(QWidget):
         lo, hi = self._band
         y_lo = self.tf.n2v(0.0, lo).y()
         y_hi = self.tf.n2v(0.0, hi).y()
+        # 環景下影像左右無限延伸,遮罩與虛線要跨整個視窗寬,否則只蓋住主圈那一份。
+        span = QRectF(self.rect()) if self.tf.wrap_x else image_rect
 
-        above = QRectF(image_rect.left(), image_rect.top(), image_rect.width(),
-                       max(0.0, y_lo - image_rect.top()))
-        below = QRectF(image_rect.left(), y_hi, image_rect.width(),
-                       max(0.0, image_rect.bottom() - y_hi))
+        above = QRectF(span.left(), span.top(), span.width(),
+                       max(0.0, y_lo - span.top()))
+        below = QRectF(span.left(), y_hi, span.width(),
+                       max(0.0, span.bottom() - y_hi))
         for band in (above, below):
-            clipped = band.intersected(image_rect)
+            clipped = band.intersected(span)
             if not clipped.isEmpty():
                 painter.fillRect(clipped, COLOR_OUTSIDE)
 
         pen = QPen(COLOR_BAND, 1, Qt.PenStyle.DashLine)
         painter.setPen(pen)
         for value, y in ((lo, y_lo), (hi, y_hi)):
-            painter.drawLine(QPointF(image_rect.left(), y), QPointF(image_rect.right(), y))
-            painter.drawText(QPointF(image_rect.left() + 6.0, y - 4.0), f"y={value:.5f}")
+            painter.drawLine(QPointF(span.left(), y), QPointF(span.right(), y))
+            painter.drawText(QPointF(span.left() + 6.0, y - 4.0), f"y={value:.5f}")
 
     def _draw_dets(self, painter: QPainter) -> None:
         assert self._frame is not None
         dets = self._frame.dets
         metrics = QFontMetricsF(self._label_font)
+        shifts = list(self._shifts())
         for index, det in enumerate(dets):
-            rect = self.tf.n2v_rect(det.bbox)
+            base = self.tf.n2v_rect(det.bbox)
             color = det_color(det)
             selected = index == self._sel
-            painter.setPen(QPen(color, 3 if selected else 2))
-            painter.drawRect(rect)
-            self._draw_tag(painter, metrics, rect, det.display_text(), color)
+            for k in shifts:
+                rect = base.translated(k * self.tf.span_x, 0.0)
+                painter.setPen(QPen(color, 3 if selected else 2))
+                painter.drawRect(rect)
+                self._draw_tag(painter, metrics, rect, det.display_text(), color)
         if 0 <= self._sel < len(dets):
-            self._draw_handles(painter, self.tf.n2v_rect(dets[self._sel].bbox))
+            base = self.tf.n2v_rect(dets[self._sel].bbox)
+            for k in shifts:
+                self._draw_handles(painter, base.translated(k * self.tf.span_x, 0.0))
 
     def _draw_tag(
         self, painter: QPainter, metrics: QFontMetricsF, rect: QRectF, text: str, color: QColor
@@ -597,4 +675,6 @@ class ImageCanvas(QWidget):
             return
         painter.setPen(QPen(det_color(self._new_det), 2, Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(self.tf.n2v_rect(self._new_det.bbox))
+        base = self.tf.n2v_rect(self._new_det.bbox)
+        for k in self._shifts():
+            painter.drawRect(base.translated(k * self.tf.span_x, 0.0))

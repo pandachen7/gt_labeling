@@ -192,6 +192,35 @@ def main() -> int:
         check(canvas.frame is not None and canvas.frame.size == (3840, 1920),
               "首幀尺寸 3840x1920")
 
+        section("環景 hit-test:接縫另一側點得到同一個框")
+        # 造一個確定跨接縫的框,再從畫面另一側點它。canvas 若只測主圈就會漏掉。
+        canvas.tf.wrap_x = True
+        canvas.tf.zoom = canvas.tf.fit_zoom(canvas.size())
+        canvas.tf.off_x = 0.0
+        canvas.tf.off_y = 0.0
+        window.frames[window.index].dets.append(
+            Det(label="person", track_id=777, ppe="ng", bbox=[0.97, 0.30, 1.02, 0.45])
+        )
+        canvas.reload_dets()
+        app.processEvents()
+        seam_det = len(window.frames[window.index].dets) - 1
+        # 框的右段繞回畫面左邊:x=1.00 那一圈 → widget x = 0.00*span,取框中段
+        left_x = round(0.01 * canvas.tf.span_x)
+        mid_y = round(canvas.tf.n2v(0.0, 0.375).y())
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                         QPoint(left_x, mid_y))
+        app.processEvents()
+        check(canvas.selected_index == seam_det,
+              f"從畫面左緣點到繞過來的那一段,選中同一個框"
+              f"(預期 index {seam_det},實際 {canvas.selected_index})")
+        del window.frames[window.index].dets[seam_det]
+        canvas.reload_dets()
+        # 收尾以 model 為準恢復檢視狀態,**不要**寫死 False:Task 6 之後 3840x1920
+        # 會自動進環景,寫死 False 會讓後續區段的環景斷言假 FAIL。
+        canvas.tf.wrap_x = window.frames[window.index].wrap_x
+        canvas.tf.clamp_offset(canvas.size())
+        app.processEvents()
+
         # 逐幀瀏覽測的是每幀解碼成本,走幾幀夠了就好;整份 600 幀走完只是把
         # 同一件事重複八次,徒增驗收時間。
         walk = min(WALK_FRAMES, len(window.frames) - 1)

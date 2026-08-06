@@ -492,6 +492,35 @@ def test_transform_wrap() -> None:
     check(tf2.off_y == 0.0, f"y 仍被夾住不許拖出視窗(實際 {tf2.off_y})")
 
 
+def test_canvas_wrap_geometry() -> None:
+    """畫布環繞的兩個關鍵幾何:框在每一圈的位置、hit-test 命中對側那一份。"""
+    section("環景畫布幾何")
+    tf = ViewTransform()
+    tf.set_image_size(3840, 1920)
+    tf.wrap_x = True
+    tf.zoom = 1000.0 / 3840.0          # span_x = 1000
+    tf.off_x = 0.0
+    tf.off_y = 0.0
+
+    # 跨縫框 x=0.94~1.01:主圈畫在 940~1010,前一圈畫在 -60~10
+    bbox = [0.94, 0.5, 1.01, 0.7]
+    rect = tf.n2v_rect(bbox)
+    check(round(rect.left(), 6) == 940.0 and round(rect.right(), 6) == 1010.0,
+          f"主圈落在 940~1010 {rect.left()}~{rect.right()}")
+    shifted = rect.translated(-1 * tf.span_x, 0.0)
+    check(round(shifted.left(), 6) == -60.0 and round(shifted.right(), 6) == 10.0,
+          f"前一圈落在 -60~10 {shifted.left()}~{shifted.right()}")
+
+    # 視窗寬 1600:x=5 這個點應該落在「前一圈」的框裡,主圈測不到
+    point_x = 5.0
+    hit_main = rect.left() <= point_x <= rect.right()
+    hit_prev = shifted.left() <= point_x <= shifted.right()
+    check(not hit_main and hit_prev,
+          "畫面最左邊的點命中的是前一圈的框,所以 hit-test 必須逐圈測")
+    check(-1 in tf.visible_shifts(1600.0) or 0 in tf.visible_shifts(1600.0),
+          f"visible_shifts 有涵蓋這些圈 {list(tf.visible_shifts(1600.0))}")
+
+
 def main() -> int:
     source = Path(
         sys.argv[1] if len(sys.argv) > 1
@@ -518,6 +547,7 @@ def main() -> int:
     test_frame_wrap_state()
     test_transform_roundtrip()
     test_transform_wrap()
+    test_canvas_wrap_geometry()
 
     print("\n" + "=" * 60)
     if FAILURES:
