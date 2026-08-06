@@ -160,6 +160,28 @@ def main() -> int:
         print(f"       重繪平均 {repaint * 1000:.1f} ms(不重新解碼 JPEG)")
         check(repaint < 0.050, f"重繪 < 50ms(實際 {repaint * 1000:.1f} ms)")
 
+        section("Home / End 跳首末幀")
+        window._goto(len(window.frames) // 2)
+        app.processEvents()
+        check(window.act_first.isEnabled() and window.act_last.isEnabled(),
+              "在中間幀時「首幀」「末幀」都可用")
+        # 真的按鍵(不是只 trigger action):順便驗快捷鍵確實接在畫布上。
+        canvas.setFocus()
+        app.processEvents()
+        QTest.keyClick(canvas, Qt.Key.Key_Home)
+        app.processEvents()
+        check(window.index == 0, f"按 Home 跳到第一幀(實際 index={window.index})")
+        check(not window.act_first.isEnabled(), "已在第一幀時「首幀」停用")
+        QTest.keyClick(canvas, Qt.Key.Key_End)
+        app.processEvents()
+        check(window.index == len(window.frames) - 1,
+              f"按 End 跳到最後一幀(實際 index={window.index})")
+        check(not window.act_last.isEnabled(), "已在最後一幀時「末幀」停用")
+        # 綁在畫布而非視窗,jump_edit 打字時的 Home / End 才不會被搶走。
+        check(window.act_first.shortcutContext() == Qt.ShortcutContext.WidgetShortcut
+              and window.act_first in canvas.actions(),
+              "Home / End 綁在畫布(WidgetShortcut),不攔 jump_edit 的行首 / 行尾")
+
         section("滑鼠拖曳:移動框")
         target_index = next(i for i, f in enumerate(window.frames) if len(f.dets) >= 5)
         window._goto(target_index)

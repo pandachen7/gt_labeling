@@ -47,7 +47,7 @@ DEFAULT_HEIGHT = 940
 CONFLICT_PREVIEW = 12
 
 HELP_TEXT = """\
-A / ← 上一張    D / → 下一張
+A / ← 上一張    D / → 下一張    Home / End 首幀 / 末幀
 滑鼠滾輪 縮放     中鍵 / 右鍵 / Space+左鍵 平移
 左鍵拖空白 新增框(套用右上「新框預設」)
   補錨點前先點該 track 任一框,再選「沿用 #id」
@@ -155,6 +155,14 @@ class MainWindow(QMainWindow):
         self.act_next.setShortcut(QKeySequence(Qt.Key.Key_PageDown))
         self.act_next.triggered.connect(lambda: self._navigate(1))
 
+        self.act_first = QAction("首幀", self)
+        self.act_first.setShortcut(QKeySequence(Qt.Key.Key_Home))
+        self.act_first.triggered.connect(lambda: self._goto(0))
+
+        self.act_last = QAction("末幀", self)
+        self.act_last.setShortcut(QKeySequence(Qt.Key.Key_End))
+        self.act_last.triggered.connect(lambda: self._goto(len(self.frames) - 1))
+
         self.act_save = QAction("存檔", self)
         self.act_save.setShortcut(QKeySequence(QKeySequence.StandardKey.Save))
         self.act_save.triggered.connect(self._save_current)
@@ -203,6 +211,14 @@ class MainWindow(QMainWindow):
         ):
             self.addAction(action)
             toolbar.addAction(action)
+
+        # Home / End 綁在畫布而非整個視窗:視窗層的快捷鍵會連 jump_edit 打字時
+        # 一起攔掉,那裡的 Home / End 必須留給行首 / 行尾。幀清單有焦點時
+        # QListWidget 自己跳第一 / 最後一列,經 rowSelected 走到同一個 _goto。
+        for action in (self.act_first, self.act_last):
+            action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+            self.canvas.addAction(action)
+        toolbar.insertActions(self.act_save, [self.act_first, self.act_last])
 
         toolbar.addSeparator()
         toolbar.addWidget(QLabel(" 跳到 seq "))
@@ -787,6 +803,8 @@ class MainWindow(QMainWindow):
         stack = self.undo_stacks[self.index] if 0 <= self.index < len(self.frames) else None
         self.act_prev.setEnabled(has_data and self.index > 0)
         self.act_next.setEnabled(has_data and self.index < len(self.frames) - 1)
+        self.act_first.setEnabled(has_data and self.index > 0)
+        self.act_last.setEnabled(has_data and self.index < len(self.frames) - 1)
         self.act_save.setEnabled(has_data)
         self.act_fit.setEnabled(has_data)
         self.act_undo.setEnabled(bool(stack and stack.can_undo))

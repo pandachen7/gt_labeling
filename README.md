@@ -88,6 +88,7 @@ uv run --project D:\ws\gt_labeling gt-labeling <root> --band 0.5 0.9
 | ------------------------- | -------------------------------- |
 | `A` / `←` / `PageUp`      | 上一張                           |
 | `D` / `→` / `PageDown`    | 下一張                           |
+| `Home` / `End`            | 第一幀 / 最後一幀                |
 | `Delete` / `Backspace`    | 刪除選取的框                     |
 | `F`                       | 還原檢視(fit)                    |
 | `Esc`                     | 取消進行中的拖曳                 |
