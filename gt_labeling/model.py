@@ -144,6 +144,27 @@ class FrameLabel:
     def has_null_ppe(self) -> bool:
         return any(d.is_person and d.ppe is None for d in self.dets)
 
+    @property
+    def has_duplicate_track(self) -> bool:
+        """同一幀有兩個框共用同一個 ``(label, track_id)``。
+
+        一個目標在一幀裡只該有一個框,重複多半是換號撞到既有號碼、或上游把兩個
+        目標配成同一條軌跡,兩種都得回頭看。
+
+        跨 label 同號不算重複:軌跡身分是 ``(label, track_id)``,person#1 與
+        drone#1 本來就是兩條軌跡,而兩種 label 常各自從 0 開始編號——算進來的話
+        警示會每幀都亮,等於沒有警示。
+        """
+        seen = set()
+        for det in self.dets:
+            if det.track_id is None:
+                continue
+            key = (det.label, det.track_id)
+            if key in seen:
+                return True
+            seen.add(key)
+        return False
+
     # ------------------------------------------------------------------ 序列化
 
     def dets_json(self) -> list[dict]:

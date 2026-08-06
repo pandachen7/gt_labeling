@@ -578,6 +578,44 @@ def main() -> int:
         window.list_panel.refresh_summary(window.frames)
         print(f"       摘要:{window.list_panel.summary.text().replace(chr(10), ' | ')}")
 
+        section("id 重疊警示")
+        dup_row = next(
+            (i for i, f in enumerate(window.frames)
+             if not f.has_duplicate_track and any(d.track_id is not None for d in f.dets)),
+            None,
+        )
+        check(dup_row is not None, "找到一幀本來沒有 id 重疊的列當基準")
+        if dup_row is not None:
+            dup_frame = window.frames[dup_row]
+            base = next(d for d in dup_frame.dets if d.track_id is not None)
+            check("DUP" not in window.list_panel.list.item(dup_row).text(),
+                  "沒有重疊的列不帶 DUP 標記")
+
+            twin = Det(label=base.label, track_id=base.track_id, ppe=base.ppe,
+                       bbox=[0.40, 0.40, 0.45, 0.45])
+            dup_frame.dets.append(twin)
+            window.list_panel.refresh_row(dup_row, dup_frame)
+            check(dup_frame.has_duplicate_track,
+                  f"同幀出現兩個 {base.label}#{base.track_id} → 判定為 id 重疊")
+            check("DUP" in window.list_panel.list.item(dup_row).text(),
+                  f"該列文字含 DUP 標記:{window.list_panel.list.item(dup_row).text()!r}")
+            window.list_panel.refresh_summary(window.frames)
+            check("id 重疊 1 幀" in window.list_panel.summary.text(),
+                  f"摘要算進去:{window.list_panel.summary.text().replace(chr(10), ' | ')!r}")
+
+            # 跨 label 同號是正常的(person#1 與 drone#1 是兩條軌跡),不該警示。
+            twin.label = "drone" if base.label == "person" else "person"
+            twin.ppe = "ng" if twin.label == "person" else None
+            check(not dup_frame.has_duplicate_track,
+                  f"改成 {twin.label}#{base.track_id} 後不算重疊(認軌是 (label, track_id))")
+
+            dup_frame.dets.remove(twin)
+            window.list_panel.refresh_row(dup_row, dup_frame)
+            window.list_panel.refresh_summary(window.frames)
+            check(not dup_frame.dirty and "DUP" not in
+                  window.list_panel.list.item(dup_row).text(),
+                  "移除後標記消失且不算未存")
+
         section("輸出截圖")
         OUT_DIR.mkdir(exist_ok=True)
         window._goto(target_index)
