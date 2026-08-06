@@ -516,6 +516,7 @@ class MainWindow(QMainWindow):
         what = f"{label} #{track_id}" if label else f"#{track_id}(不分 label)"
         if not hits:
             self.statusBar().showMessage(f"整份資料集找不到 {what}", 5000)
+            self._warn_not_found(label, track_id, what)
             return
 
         here = (self.index, self.canvas.selected_index)
@@ -549,6 +550,23 @@ class MainWindow(QMainWindow):
             f"{note}",
             6000,
         )
+
+    def _warn_not_found(self, label: str | None, track_id: int, what: str) -> None:
+        """找不到就擋下來說清楚,不只在狀態列閃一下。
+
+        找不到多半不是「這條軌跡真的不存在」,而是**下拉的 label 選錯了**——
+        軌跡身分是 ``(label, track_id)``,而 person 與 drone 常各自從 0 開始編號,
+        同一個號碼兩邊都有人用。所以限定 label 落空時再用不分 label 掃一次,把
+        「號碼掛在哪」直接寫進對話框;沒有這一句,人只會反覆確認自己有沒有打錯字。
+        """
+        hint = ""
+        if label is not None:
+            elsewhere = find_track(self.frames, None, track_id)
+            if elsewhere:
+                others = sorted({self.frames[i].dets[k].label for i, k in elsewhere})
+                hint = (f"\n\n但 #{track_id} 在 {' / '.join(others)} 出現 "
+                        f"{len(elsewhere)} 次——label 下拉可能選錯了。")
+        QMessageBox.warning(self, "找不到 track", f"整份資料集沒有 {what}。{hint}")
 
     def _prefetch_around(self, index: int) -> None:
         lo = max(0, index - PREFETCH_RADIUS)

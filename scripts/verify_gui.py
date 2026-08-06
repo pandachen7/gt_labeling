@@ -745,16 +745,38 @@ def main() -> int:
         window.frames[dup_i].dets.remove(twin2)
         check(not window.frames[dup_i].dirty, "移除後該幀回到已存狀態")
 
-        # 前置不足時要說明原因並原地不動(同補框 / 改 id 的慣例)。
+        # 找不到要擋下來說清楚:狀態列閃一下容易被忽略,所以再彈一個警示視窗。
         stay = (window.index, canvas.selected_index)
         nobody = max(d.track_id for f in window.frames for d in f.dets
                      if d.track_id is not None) + 999
         window.find_edit.setText(str(nobody))
+        popped: list[tuple[str, str]] = []
+        catch_modal(popped)
         window._find_next(1)
         app.processEvents()
         check((window.index, canvas.selected_index) == stay, "找不到時位置不動")
+        check(len(popped) == 1 and popped[0][0] == "找不到 track",
+              f"找不到會彈警示視窗(實際 {popped})")
+        missing_text = popped[0][1] if popped else ""
+        check(f"沒有 {probe_label} #{nobody}" in missing_text,
+              f"視窗寫出找不到誰:{missing_text!r}")
+        check("label 下拉" not in missing_text,
+              "這個號碼哪個 label 都沒有,就不亂給「選錯 label」的提示")
         check("找不到" in window.statusBar().currentMessage(),
-              f"且說明找不到:{window.statusBar().currentMessage()!r}")
+              f"狀態列同時留一份:{window.statusBar().currentMessage()!r}")
+
+        # 限定錯 label 是最常見的落空原因,視窗要直接指出號碼其實掛在哪一種。
+        window.find_kind.setCurrentIndex(window.find_kind.findData(other))
+        window.find_edit.setText(str(probe_tid))
+        popped.clear()
+        catch_modal(popped)
+        window._find_next(1)
+        app.processEvents()
+        wrong_label = popped[0][1] if popped else ""
+        check(f"#{probe_tid} 在 {probe_label} 出現 {len(hits)} 次" in wrong_label,
+              f"指出號碼其實掛在 {probe_label}:{wrong_label!r}")
+        check((window.index, canvas.selected_index) == stay, "提示歸提示,位置仍不動")
+        window.find_kind.setCurrentIndex(window.find_kind.findData(probe_label))
 
         window.find_edit.clear()
         window._find_next(1)
