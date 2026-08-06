@@ -880,18 +880,23 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------- 刪掉一條軌跡的某一段
 
     def _remember_track(self) -> None:
-        """記住最後點過的框屬於哪一條軌跡。
+        """記住最後點過的框屬於哪一條軌跡:「刪這條」的目標與「沿用 #id」都跟著它。
 
         黏著值而非即時讀 ``canvas.selected_det``:切幀時 ``set_frame`` 會清掉畫布
         選取,而這功能的操作順序正是「點框 → 到左邊清單圈一段幀 → Delete」,中間
         必然切過幀,真要現場問就永遠問不到。理由同 ``NewDetPanel`` 的「沿用 #id」。
 
+        兩個記憶一起更新而不各自維護:它們問的是同一件事——「使用者現在正在處理哪
+        一條軌跡」。分開更新就會像先前那樣漏掉一半:在右側面板改掉號碼後,刪除目標
+        跟上了,「沿用 #id」卻還停在舊號,接著畫的錨點默默掛回剛淘汰掉的號碼。
+
         沒有 track_id 的框不覆蓋既有記憶:那種框連自己是哪一條都還沒定,拿它當
-        刪除目標沒有意義,反而會把人剛選好的目標洗掉。
+        刪除目標或新框號碼都沒有意義,反而會把人剛選好的目標洗掉。
         """
         det = self.canvas.selected_det
         if det is not None and det.track_id is not None:
             self._last_track = (det.label, det.track_id)
+            self.new_panel.set_follow_candidate(det.track_id)
 
     def _delete_track_range(self) -> None:
         """幀清單按 Delete:把記住的那條軌跡,在選取的那幾幀裡整段刪掉。
@@ -1008,8 +1013,6 @@ class MainWindow(QMainWindow):
         frame = self.frames[self.index] if 0 <= self.index < len(self.frames) else None
         selected = self.canvas.selected_det
         self.det_panel.set_det(selected, frame.size if frame is not None else None)
-        if selected is not None:
-            self.new_panel.set_follow_candidate(selected.track_id)
         self._remember_track()
         # 走統一刷新而非單獨設某個 action:選取狀態會影響不只一個動作,
         # 逐一手動更新遲早漏掉(「補框」就是這樣一直停在停用狀態)。
@@ -1049,8 +1052,9 @@ class MainWindow(QMainWindow):
         self.list_panel.refresh_row(self.index, frame)
         self.list_panel.refresh_summary(self.frames)
         self.det_panel.set_det(self.canvas.selected_det, frame.size)
-        # 在右側面板改掉選取框的 label / track_id 不會發 selectionChanged,
-        # 記憶得在這裡跟上,否則「刪這條」刪的還是改號前的舊軌跡。
+        # 在右側面板改掉選取框的 label / track_id 不會發 selectionChanged,兩個
+        # 黏著記憶都得在這裡跟上:否則「刪這條」刪的還是改號前的舊軌跡,「沿用
+        # #id」也還掛著舊號。
         self._remember_track()
         self._refresh_actions()
         self._refresh_status()
