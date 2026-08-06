@@ -30,17 +30,41 @@ BBOX_DP = 5
 MIN_SPAN = 10.0**-BBOX_DP
 
 
-def canonical_bbox(bbox) -> list[float]:
-    """排序 -> clamp [0,1] -> round 5 位 -> 保證有非零寬高。"""
+def canonical_bbox(bbox, wrap: bool = False) -> list[float]:
+    """排序 -> clamp -> round 5 位 -> 保證有非零寬高。
+
+    ``wrap=True`` 是 equirect 環景模式:x 不 clamp,改成把左界取模回 ``[0,1)``、
+    右界寫成 ``x1 + 寬度``(可越過 1.0)。這個「延伸表示」不是本工具發明的 —— 上游
+    ``gt_densify.py`` 就這樣落檔(實測 x2 到 1.11),下游 ``eval_gt.py`` /
+    ``evaluate.py`` 的 ``wrap_iou`` 靠 x 平移 ±1 來配對它。夾回 [0,1] 會把跨縫的人
+    切成半個框,而且沒有任何流程會報錯。
+
+    跨縫由「x2 越界」表達,不由「x1 > x2」表達,所以這裡照樣排序 —— 反向拖曳
+    (往起點左邊拖)的既有行為因此完全不受影響。``wrap_iou`` 也吃不下 x2<x1:
+    那會算成負寬、面積 0,該框在評估裡永遠是 FN。
+
+    y 兩種模式都一樣 clamp 到 [0,1]:equirect 的上下是極點,不是環狀鄰接。
+    """
     x1, y1, x2, y2 = (float(v) for v in bbox)
     if x2 < x1:
         x1, x2 = x2, x1
     if y2 < y1:
         y1, y2 = y2, y1
-    x1, y1, x2, y2 = (min(max(v, 0.0), 1.0) for v in (x1, y1, x2, y2))
-    x1, y1, x2, y2 = (round(v, BBOX_DP) for v in (x1, y1, x2, y2))
-    x1, x2 = _ensure_span(x1, x2)
+
+    y1, y2 = (min(max(v, 0.0), 1.0) for v in (y1, y2))
+    y1, y2 = (round(v, BBOX_DP) for v in (y1, y2))
     y1, y2 = _ensure_span(y1, y2)
+
+    if wrap:
+        # 先 round 再取模:round(0.999996, 5) 會變成 1.0,取模後才落回 0.0;
+        # 反過來先取模的話,0.999996 會原樣留下,再 round 就跑出 [0,1) 了。
+        width = min(max(x2 - x1, MIN_SPAN), 1.0)
+        x1 = round(round(x1, BBOX_DP) % 1.0, BBOX_DP)
+        x2 = round(x1 + width, BBOX_DP)
+    else:
+        x1, x2 = (min(max(v, 0.0), 1.0) for v in (x1, x2))
+        x1, x2 = (round(v, BBOX_DP) for v in (x1, x2))
+        x1, x2 = _ensure_span(x1, x2)
     return [x1, y1, x2, y2]
 
 

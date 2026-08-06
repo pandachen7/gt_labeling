@@ -271,6 +271,40 @@ def test_canonical_bbox() -> None:
     check(canonical_bbox(canonical_bbox([0.123456789, 0.5, 0.987654321, 0.6]))
           == canonical_bbox([0.123456789, 0.5, 0.987654321, 0.6]), "canonical 是冪等的")
 
+    section("canonical_bbox 環景模式(wrap=True)")
+    # 跨縫框:上游 gt_densify 送來的形式,不得被 clamp 成半個框
+    check(canonical_bbox([0.94063, 0.5, 1.00348, 0.7], wrap=True)
+          == [0.94063, 0.5, 1.00348, 0.7], "跨縫框原樣保留,x2 不被夾到 1.0")
+    check(canonical_bbox(canonical_bbox([0.94063, 0.5, 1.00348, 0.7], wrap=True), wrap=True)
+          == canonical_bbox([0.94063, 0.5, 1.00348, 0.7], wrap=True),
+          "跨縫框的 canonical 是冪等的")
+    # 一般框在 wrap 下輸出必須與 wrap=False 完全相同
+    for bbox in ([0.3, 0.4, 0.5, 0.6], [0.12346, 0.5, 0.98765, 0.6]):
+        check(canonical_bbox(bbox, wrap=True) == canonical_bbox(bbox, wrap=False),
+              f"非跨縫框 {bbox} 在 wrap 下輸出不變")
+    # 往左出界:x1 取模後自然落回右側
+    check(canonical_bbox([-0.03, 0.5, 0.02, 0.7], wrap=True) == [0.97, 0.5, 1.02, 0.7],
+          "往左出界的框 x1 取模成 0.97,寬度保持 0.05")
+    # 越過一整圈以上:x1 仍落回 [0,1)
+    left = canonical_bbox([1.94063, 0.5, 1.96, 0.7], wrap=True)
+    check(0.0 <= left[0] < 1.0 and round(left[2] - left[0], 5) == 0.01937,
+          f"繞超過一圈的 x1 落回 [0,1) 且寬度不變 {left}")
+    # 反向拖曳仍被排序(跨縫由 x2 越界表達,不由 x1>x2 表達)
+    check(canonical_bbox([0.6, 0.7, 0.2, 0.3], wrap=True) == [0.2, 0.3, 0.6, 0.7],
+          "wrap 下反向座標一樣會被排序")
+    # 寬度上限:超過一整圈夾成一圈
+    full = canonical_bbox([0.1, 0.2, 2.5, 0.4], wrap=True)
+    check(round(full[2] - full[0], 5) == 1.0, f"寬度超過一整圈被夾成 1.0 {full}")
+    # 退化框
+    tiny = canonical_bbox([0.5, 0.5, 0.5, 0.5], wrap=True)
+    check(tiny[0] < tiny[2] and tiny[1] < tiny[3], f"wrap 下退化框仍保證非零寬高 {tiny}")
+    # 貼右緣的退化框:wrap 下往右長,不需要往左長的 fallback
+    edge = canonical_bbox([1.0, 0.5, 1.0, 0.5], wrap=True)
+    check(edge[0] == 0.0 and edge[2] > 0.0, f"x1=1.0 取模成 0.0 並往右長 {edge}")
+    # y 軸行為在 wrap 下完全不變
+    check(canonical_bbox([0.3, -0.5, 0.4, 1.8], wrap=True)[1::2] == [0.0, 1.0],
+          "wrap 下 y 仍 clamp 到 [0,1]")
+
 
 def test_transform_roundtrip() -> None:
     section("ViewTransform 可逆性(座標漂移防線)")
