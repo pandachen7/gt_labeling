@@ -92,6 +92,7 @@ class ImageCanvas(QWidget):
     detsEdited = pyqtSignal()
     viewChanged = pyqtSignal()
     navigateRequested = pyqtSignal(int)
+    deleteRequested = pyqtSignal()
     hoverMoved = pyqtSignal(float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -435,8 +436,10 @@ class ImageCanvas(QWidget):
             self._space_held = True
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             return
+        # 不直接刪,繞回視窗:刪除得走同一個入口,視窗才有機會在整個刪除過程中
+        # 守住「沿用 #id」——刪完選取會遞補到隔壁的框,那不是使用者指定的軌跡。
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            self.delete_selected()
+            self.deleteRequested.emit()
             return
         if key in (Qt.Key.Key_A, Qt.Key.Key_Left):
             self.navigateRequested.emit(-1)

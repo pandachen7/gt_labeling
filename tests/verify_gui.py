@@ -35,6 +35,7 @@ from gt_labeling.model import (
     plan_remap,
     plan_track_delete,
 )
+from gt_labeling.panel import NewDetPanel
 from gt_labeling.window import MainWindow
 
 FAILURES: list[str] = []
@@ -316,6 +317,9 @@ def main() -> int:
               "左上邊沒有跟著跑")
 
         section("新框預設選擇器:drone")
+        # track_id 的預設是「沿用」,而前面已經點過框(候選有值)。這兩段要測的是
+        # 自動取號,得先明確切過去,否則新框會掛上剛剛點過的那個號碼。
+        window.new_panel.auto_radio.setChecked(True)
         count_before = len(frame.dets)
         expected_id = max(
             (d.track_id for d in frame.dets if d.track_id is not None), default=-1
@@ -357,16 +361,24 @@ def main() -> int:
         check(not new_det.pending, "person 新框不再是待補")
 
         section("新框預設:沿用選取框的 track_id")
-        check(window.new_panel.follow_id() is None, "沒選「沿用」時 follow_id() 回 None")
+        check(window.new_panel.follow_id() is None, "選了自動時 follow_id() 回 None")
+
+        # 補錨點是主力用法,面板一開起來就該站在「沿用」上、而且排在「自動」前面。
+        # 拿全新的面板來驗:window 上那個已經被前面幾段切來切去。
+        fresh = NewDetPanel()
+        fresh_box = fresh.follow_radio.parentWidget().layout()
+        check(fresh.follow_radio.isChecked(), "「沿用」是 track_id 的開機預設")
+        check(fresh_box.indexOf(fresh.follow_radio) < fresh_box.indexOf(fresh.auto_radio),
+              "「沿用」排在「自動」前面")
+        check(fresh.follow_id() is None, "還沒點過框時「沿用」退回自動取號(follow_id() 回 None)")
+        fresh.deleteLater()
 
         anchor_pos = next(k for k, d in enumerate(frame.dets) if d.track_id is not None)
         canvas.select(anchor_pos)
         app.processEvents()
         anchor_id = frame.dets[anchor_pos].track_id
-        check(window.new_panel.follow_radio.isEnabled(),
-              f"點過框後「沿用」可選,候選 = #{anchor_id}")
         check(f"#{anchor_id}" in window.new_panel.follow_radio.text(),
-              f"radio 顯示候選號碼:{window.new_panel.follow_radio.text()!r}")
+              f"點過框後 radio 顯示候選號碼:{window.new_panel.follow_radio.text()!r}")
 
         # 兩組 radio 必須互不干擾:切 label 不能把 track_id 的選擇彈掉。
         window.new_panel.follow_radio.setChecked(True)
@@ -390,7 +402,7 @@ def main() -> int:
         window.new_panel.set_label("person")
         app.processEvents()
         check(window.new_panel.follow_id() is None, "切回自動後不再沿用")
-        canvas.delete_selected()
+        window._delete_selected()
         app.processEvents()
 
         section("面板編輯 + Delete")
@@ -418,10 +430,34 @@ def main() -> int:
         app.processEvents()
         check(frame.dets[-1].ppe == "ng", f"ppe 寫入 ng(實際 {frame.dets[-1].ppe})")
 
+        # 刪除不能動到黏著記憶:刪完選取會遞補到隔壁的框,那是 index 位移的副作用,
+        # 不是使用者指定的軌跡。飄掉的話,接著補的錨點會默默掛上隔壁那條的號碼。
+        #
+        # 挑一個「下一個框屬於別條軌跡」的位置來刪,這條驗收才有鑑別力:遞補到同
+        # 一條的話,記憶飄不飄都看不出差別。刪掉 pos 之後選取會落回 pos,也就是
+        # 原本 pos+1 的那個框。
+        pos = next((k for k in range(len(frame.dets) - 1)
+                    if frame.dets[k].track_id is not None
+                    and frame.dets[k + 1].track_id != frame.dets[k].track_id), None)
+        check(pos is not None, "找到一個刪掉後會遞補到別條軌跡的框")
+        if pos is not None:
+            canvas.select(pos)
+            app.processEvents()
+            neighbour_id = frame.dets[pos + 1].track_id
+            check(f"#{neighbour_id}" not in window.new_panel.follow_radio.text(),
+                  f"刪之前沿用停在 {window.new_panel.follow_radio.text()!r},"
+                  f"與會遞補上來的 #{neighbour_id} 不同")
+        follow_before = window.new_panel.follow_radio.text()
+        target_before = window._last_track
         count_before = len(frame.dets)
         QTest.keyClick(canvas, Qt.Key.Key_Delete)
         app.processEvents()
         check(len(frame.dets) == count_before - 1, f"Delete 刪掉一框 -> {len(frame.dets)}")
+        check(window.new_panel.follow_radio.text() == follow_before,
+              f"刪框後沿用候選不變({follow_before!r} → "
+              f"{window.new_panel.follow_radio.text()!r})")
+        check(window._last_track == target_before,
+              f"刪框後刪除目標不變({target_before} → {window._last_track})")
 
         section("復原/重做 25 步")
         baseline = frame.dets_json()
@@ -784,6 +820,7 @@ def main() -> int:
               "按取消時不動資料")
 
         # 確定那條路:走完整流程(對話框 accept)而不是直接呼叫 apply。
+        follow_before = window.new_panel.follow_radio.text()
         accepted: list = []
         catch_dialog(accepted, accept=True)
         QTest.keyClick(frame_list, Qt.Key.Key_Delete)
@@ -800,6 +837,13 @@ def main() -> int:
         check(window.frames[ghost_row].dirty, "刪完該幀標記未存")
         check(window._last_track == (probe_label, probe_tid),
               "刪完預填值仍停在同一條(幽靈框常分好幾段,要能接著刪下一段)")
+        # 回歸錨點,不是鑑別測試:實測拿掉 _remember_track 的凍結後這條仍會通過
+        # ——這個樣本刪完剛好遞補回同一條。真正抓得到凍結失效的是上面「面板編輯 +
+        # Delete」那段(它刻意挑了會遞補到別條軌跡的位置)。留著是防 apply_track_delete
+        # 之後被改動時誤傷。
+        check(window.new_panel.follow_radio.text() == follow_before,
+              f"刪完「沿用 #id」不變({follow_before!r} → "
+              f"{window.new_panel.follow_radio.text()!r})")
         check(canvas.hasFocus(), "刪完焦點交還畫布(接著就是看畫面確認,A / D 也還能翻)")
 
         window._undo_last_bulk()

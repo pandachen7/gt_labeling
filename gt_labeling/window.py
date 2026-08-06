@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 from PyQt6.QtCore import QSettings, Qt
@@ -61,7 +63,7 @@ HELP_TEXT = """\
 A / ← 上一張    D / → 下一張    Home / End 首幀 / 末幀
 滑鼠滾輪 縮放     中鍵 / 右鍵 / Space+左鍵 平移
 左鍵拖空白 新增框(套用右上「新框預設」)
-  補錨點前先點該 track 任一框,再選「沿用 #id」
+  預設「沿用 #id」:先點該 track 任一框,之後畫的都掛同一號
 左鍵點框 選取,拖角邊改大小,拖框內移動
 Delete 刪除選取框(焦點在畫布)    F 還原檢視
 Ctrl+S 存檔   Ctrl+Z 復原   Ctrl+Shift+Z 重做
@@ -92,6 +94,8 @@ class MainWindow(QMainWindow):
         # 最後點過的框屬於哪一條軌跡。只當「刪除軌跡」對話框的預填值——真正送出去
         # 的是對話框裡那一組,所以這份記憶不準也不會默默刪錯東西。
         self._last_track: tuple[str, int] | None = None
+        # 刪除進行中,黏著記憶暫停更新。見 ``_frozen_track_memory``。
+        self._freeze_track_memory = False
 
         self.store = ImageStore(cache_size, self)
         self.store.ready.connect(self._on_image_ready)
@@ -161,6 +165,7 @@ class MainWindow(QMainWindow):
         self.canvas.detsEdited.connect(self._on_dets_edited)
         self.canvas.viewChanged.connect(self._refresh_status)
         self.canvas.navigateRequested.connect(self._navigate)
+        self.canvas.deleteRequested.connect(self._delete_selected)
         self.canvas.hoverMoved.connect(self._on_hover)
         self.list_panel.rowSelected.connect(self._goto)
         self.list_panel.deleteRequested.connect(self._delete_track_range)
@@ -208,7 +213,7 @@ class MainWindow(QMainWindow):
         self.act_redo.triggered.connect(self._redo)
 
         self.act_delete = QAction("刪除框", self)
-        self.act_delete.triggered.connect(self.canvas.delete_selected)
+        self.act_delete.triggered.connect(self._delete_selected)
 
         self.act_remap_range = QAction("改選取幀內的軌跡 id…", self)
         self.act_remap_range.setShortcut(QKeySequence("Ctrl+Shift+R"))
@@ -1009,11 +1014,33 @@ class MainWindow(QMainWindow):
 
         沒有 track_id 的框不覆蓋既有值:那種框連自己是哪一條都還沒定,拿它當
         刪除目標或新框號碼都沒有意義,反而會把人剛選好的目標洗掉。
+
+        刪除期間整個停手:記的是「使用者主動指定了哪一條」,而刪完選取會遞補到
+        隔壁的框——那是 index 位移的副作用,不是指定。見 ``_frozen_track_memory``。
         """
+        if self._freeze_track_memory:
+            return
         det = self.canvas.selected_det
         if det is not None and det.track_id is not None:
             self._last_track = (det.label, det.track_id)
             self.new_panel.set_follow_candidate(det.track_id)
+
+    @contextmanager
+    def _frozen_track_memory(self) -> Generator[None, None, None]:
+        """這段期間的選取變動不算「使用者指定的軌跡」。
+
+        刪除會從兩條路各推一次記憶更新——``selectionChanged`` 的遞補選取,以及
+        ``detsEdited`` → ``_after_model_change`` 的收尾——所以擋在 ``_remember_track``
+        這個共同出口,而不是各自的訊號處理器。
+
+        用範圍而非黏著旗標:旗標一路留著的話,刪完接著在右側面板改 track_id 就更新
+        不到記憶了。凍結只在刪除這一輪內有效。
+        """
+        self._freeze_track_memory = True
+        try:
+            yield
+        finally:
+            self._freeze_track_memory = False
 
     def _delete_preview(self, rows: list[int], label: str, track_id: int) -> tuple[int, str]:
         """對話框用的即時試算:這組 (label, id) 在選取的那幾幀裡會刪掉幾個框。
@@ -1076,19 +1103,22 @@ class MainWindow(QMainWindow):
         # 而值比對分不出同一幀裡兩個欄位完全相同的重疊框(清單上的 DUP)——那正是
         # 這功能要清掉的狀況之一,漏掉一個等於白刪。
         doomed = {id(det) for _, det in plan.targets}
-        for index in touched:
-            dets = self.frames[index].dets
-            dets[:] = [d for d in dets if id(d) not in doomed]
-            self.undo_stacks[index].commit(self.frames[index].snapshot())
+        with self._frozen_track_memory():
+            for index in touched:
+                dets = self.frames[index].dets
+                dets[:] = [d for d in dets if id(d) not in doomed]
+                self.undo_stacks[index].commit(self.frames[index].snapshot())
 
-        self._after_bulk_change(touched)
+            self._after_bulk_change(touched)
         # 焦點交還畫布:剛刪掉一整段,下一步一定是看畫面確認刪對了沒。順帶把
         # A / D 翻頁還原回來——人在幀清單裡操作時 _goto 刻意不搶焦點,而清單只吃
         # ↑↓,不放回去的話得先點一下畫布才能繼續用習慣的鍵翻幀。
         self.canvas.setFocus()
-        # 預填值顯式設回剛刪的那條:刪完後畫布的選取多半被迫改指隔壁的框(原本選
-        # 的已經不在了),記憶跟著飄走的話,下一段就得重打一次號碼。幽靈框常分成
-        # 好幾段,「刪完一段接著刪下一段」是主要用法。
+        # 預填值顯式設回剛刪的那條:遞補選取已被上面的凍結擋住,這裡處理的是另一
+        # 半——對話框裡可以當場改掉 label / id,送出的未必是剛剛點的那條。幽靈框常
+        # 分成好幾段,「刪完一段接著刪下一段」是主要用法,不設回去就得重打號碼。
+        # 「沿用 #id」刻意不跟著設:它答的是「接著畫的新框掛誰」,而剛刪掉的軌跡
+        # 不會馬上補回來,停在使用者最後主動點的那條才對。
         self._last_track = (label, track_id)
 
         seqs = [self.frames[i].seq for i in touched]
@@ -1130,6 +1160,15 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     # ------------------------------------------------------------- 編輯與 undo
+
+    def _delete_selected(self) -> None:
+        """刪掉選取的框。畫布的 Delete 鍵與選單都走這裡,不各自呼叫 canvas。
+
+        單一入口才擋得住黏著記憶被污染:``canvas.delete_selected`` 刪完會把選取
+        遞補到隔壁的框,而「沿用 #id」記的是使用者主動點過誰,不該被這個位移改掉。
+        """
+        with self._frozen_track_memory():
+            self.canvas.delete_selected()
 
     def _on_selection_changed(self, index: int) -> None:
         frame = self.frames[self.index] if 0 <= self.index < len(self.frames) else None

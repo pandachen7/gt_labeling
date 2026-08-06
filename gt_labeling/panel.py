@@ -354,11 +354,14 @@ class NewDetPanel(QWidget):
         caption.setStyleSheet("color: #909090; margin-top: 6px;")
         box.addWidget(caption)
 
-        self.auto_radio = QRadioButton("自動(本幀最大 +1)", self)
-        self.auto_radio.setChecked(True)
+        # 沿用排第一、也預設選中:補錨點——連畫好幾幀都掛同一條軌跡——才是這工具的
+        # 主力用法,自動取號是少數。不做成「先停用、點過框才能選」是因為還沒有候選
+        # 時 ``_follow_id`` 是 None,``follow_id()`` 本來就退回自動取號,預設選它拿
+        # 不到錯號碼;停用一個預設項只會讓人看到一個灰掉卻被選中的選項。
         self.follow_radio = QRadioButton("沿用(先點一個框)", self)
-        self.follow_radio.setEnabled(False)
-        for button in (self.auto_radio, self.follow_radio):
+        self.follow_radio.setChecked(True)
+        self.auto_radio = QRadioButton("自動(本幀最大 +1)", self)
+        for button in (self.follow_radio, self.auto_radio):
             track_group.addButton(button)
             box.addWidget(button)
 
@@ -397,7 +400,6 @@ class NewDetPanel(QWidget):
             return
         self._follow_id = track_id
         self.follow_radio.setText(f"沿用 #{track_id}")
-        self.follow_radio.setEnabled(True)
 
     def follow_id(self) -> int | None:
         """選了沿用且有記住的號碼才回傳,否則 None 代表走自動取號。"""
