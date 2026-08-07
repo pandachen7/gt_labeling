@@ -1566,7 +1566,11 @@ def main() -> int:
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
 ```
 
-Expected: `FAIL 強制重寫後 byte 完全相同:0/600 檔` —— 非環景語意會把每個跨縫框的 `x2` 夾到 1.0,檔案內容因此改變。**這一步證明測試有效**;沒看到 FAIL 表示這個測試根本沒在驗東西,回頭查(最可能是樣本裡沒有跨縫框,那就換一段)。
+Expected: `FAIL 強制重寫後 byte 完全相同:<N>/<總數> 檔`,其中 `N` **小於**總數 —— 非環景語意會把跨縫框的 `x2` 夾到 1.0,那些檔案的內容因此改變。
+
+`N` 不會是 0:跨縫框只出現在人走過接縫的那些幀,其餘的幀沒有越界座標,兩種模式輸出相同、byte 不變。實測某次是 `429/600`(171 個含跨縫框的檔案被改動)。**要看的是「有 FAIL」而不是特定數字** —— 資料正在被標註,比例隨時在變。
+
+**這一步證明測試有效**;沒看到 FAIL 表示這個測試根本沒在驗東西,回頭查(最可能是樣本裡沒有跨縫框,那就換一段)。
 
 確認後把那一行刪掉,**不要 commit 它**。
 
@@ -1771,7 +1775,15 @@ def test_downstream_wrap_iou() -> None:
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
 ```
 
-Expected: 全部通過,或印出 `skip`(detect_stream 不在預期位置時)。注意 detect_stream 需要 numpy,若本 repo 的 venv 沒有 numpy 就會走 skip 分支 —— 那是預期行為,**不要**為此把 numpy 加進 `pyproject.toml` 的 dependencies。
+Expected: 印出 `skip`(本 repo 的 venv 沒有 numpy,而 `evaluate.py` 需要它)。
+
+**但 skip 等於沒驗到**,所以要再跑一次真的帶 numpy 的:
+
+```bash
+uv run --project D:\ws\gt_labeling --with numpy python tests/verify_roundtrip.py
+```
+
+`--with numpy` 只在那一次執行裡臨時加套件,**不動 `pyproject.toml` 的 dependencies** —— 本工具不需要 numpy,只有這一條相容性檢查需要。兩次都跑,兩次的輸出都要留存:第一次證明沒有 numpy 也不會壞(skip 而非 crash),第二次才是真正驗到下游吃得下延伸表示。
 
 - [ ] **Step 4: 更新 README**
 
