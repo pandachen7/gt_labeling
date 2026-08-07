@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import collections
+import json
 import os
 import shutil
 import sys
@@ -231,6 +232,114 @@ def main() -> int:
         # 會自動進環景,寫死 False 會讓後續區段的環景斷言假 FAIL。
         canvas.tf.wrap_x = window.frames[window.index].wrap_x
         canvas.tf.clamp_offset(canvas.size())
+        app.processEvents()
+
+        section("環景模式")
+        check(window.act_wrap.isChecked(), "3840x1920 開檔自動進環景模式")
+        check(canvas.tf.wrap_x, "畫布的檢視也是環景")
+        check(window.frames[0].wrap_x, "model 的存檔語意也是環景")
+        check("ERP" in window.lbl_wrap.text(), f"狀態列顯示模式 {window.lbl_wrap.text()!r}")
+
+        # 環景下 pan 可以一直往旁邊拖:拖三次都不該停在同一個位置
+        before_off = canvas.tf.off_x
+        for _ in range(3):
+            canvas.tf.pan_by(-400.0, 0.0)
+            canvas.tf.clamp_offset(canvas.size())
+        check(canvas.tf.off_x != before_off, "環景下水平 pan 不會被夾住不動")
+        check(0.0 <= canvas.tf.off_x < canvas.tf.span_x,
+              f"off_x 被取模回 [0, span_x) {canvas.tf.off_x}")
+        shifts = list(canvas.tf.visible_shifts(float(canvas.width())))
+        check(len(shifts) >= 1, f"visible_shifts 至少一圈 {shifts}")
+
+        # 在接縫上新畫一個框:跨越 x=1.0 後應該存成延伸表示,不是兩截也不是巨框
+        window._goto(0)
+        app.processEvents()
+        canvas.tf.wrap_x = True
+        canvas.tf.zoom = canvas.tf.fit_zoom(canvas.size())
+        canvas.tf.off_x = canvas.width() / 2.0 - canvas.tf.span_x
+        canvas.tf.clamp_offset(canvas.size())
+        app.processEvents()
+        seam_x = round(canvas.tf.n2v(1.0, 0.0).x() - canvas.tf.span_x)
+        n_before = len(window.frames[0].dets)
+        drag(canvas, QPoint(seam_x - 25, 300), QPoint(seam_x + 25, 380))
+        app.processEvents()
+        check(len(window.frames[0].dets) == n_before + 1,
+              f"接縫上畫出一個新框({n_before} → {len(window.frames[0].dets)})")
+        if len(window.frames[0].dets) == n_before + 1:
+            bbox = window.frames[0].dets[-1].bbox
+            width = bbox[2] - bbox[0]
+            check(0.0 < width < 0.5,
+                  f"跨接縫的新框寬度合理、沒有被拉成橫跨整張圖 {bbox}")
+            check(0.0 <= bbox[0] < 1.0, f"x1 落在 [0,1) {bbox[0]}")
+            # 立刻清掉剛畫的框:留著的話,下面「關掉環景」只是想測開關本身,卻會
+            # 因為這個跨縫框撞上 Task 6 的確認對話框(有跨縫框時關環景會彈
+            # QMessageBox,offscreen 測試沒有人按按鈕,會卡死在 modal 上)。
+            del window.frames[0].dets[-1]
+
+        # 貼邊警示:造一個 x2 恰好 1.0 的框,幀清單那一列要出現 CUT
+        window._goto(0)
+        app.processEvents()
+        frame0 = window.frames[0]
+        frame0.dets.append(
+            Det(label="person", track_id=778, ppe="ng", bbox=[0.96, 0.30, 1.0, 0.45])
+        )
+        window.list_panel.refresh_row(0, frame0)
+        window.list_panel.refresh_summary(window.frames)
+        app.processEvents()
+        check(frame0.has_edge_box, "x2 恰好 1.0 → model 判定為貼邊")
+        check("CUT" in window.list_panel.list.item(0).text(),
+              f"幀清單那一列出現 CUT 旗標 {window.list_panel.list.item(0).text()!r}")
+        check("貼邊 1 幀" in window.list_panel.summary.text(),
+              f"摘要計數正確 {window.list_panel.summary.text()!r}")
+        del frame0.dets[-1]
+        window.list_panel.refresh_row(0, frame0)
+        window.list_panel.refresh_summary(window.frames)
+        check("CUT" not in window.list_panel.list.item(0).text(), "移除後 CUT 消失")
+
+        # 關掉環景:含跨縫框的幀變成未存(存出去確實會不同)
+        window.act_wrap.setChecked(False)
+        app.processEvents()
+        check(not canvas.tf.wrap_x, "取消勾選後畫布回到非環景")
+        check(not window.frames[0].wrap_x, "model 的存檔語意也跟著回去")
+        check(window.lbl_wrap.text() == "", "狀態列的環景字樣消失")
+        window.act_wrap.setChecked(True)
+        app.processEvents()
+        check(canvas.tf.wrap_x, "重新勾選回到環景")
+
+        # _apply_wrap_mode 為每一幀寫 wrap_x 的唯一理由:canvas.set_frame 會用
+        # 該幀的 wrap_x 覆寫檢視狀態,少寫一幀就會在切到它時悄悄還原模式。
+        for _ in range(3):
+            window._navigate(1)
+            app.processEvents()
+        check(canvas.tf.wrap_x, "翻幾幀之後仍在環景模式(模式沒有被 set_frame 還原)")
+        check(all(f.wrap_x for f in window.frames), "每一幀的存檔語意都是環景")
+
+        section("非 2:1 合成資料不自動進環景")
+        # 「非 2:1 行為完全不變」這條 constraint 在 GUI 層還沒有任何覆蓋。自己造
+        # 幾張 1920x1080 的假標註驗一次 —— 這段會換掉開著的資料夾,驗完換回
+        # work,否則後面每一段都會對著這份假資料跑。
+        flat_dir = tmp / "gt_flat"
+        (flat_dir / "frames").mkdir(parents=True)
+        (flat_dir / "labels").mkdir(parents=True)
+        for i in range(3):
+            (flat_dir / "labels" / f"{i:06d}.json").write_text(
+                json.dumps({
+                    "type": "gt", "version": 1, "seq": i + 1, "frame_index": i,
+                    "video_sec": float(i), "size": [1920, 1080],
+                    "image": f"../frames/{i:06d}.jpg",
+                    "dets": [
+                        {"label": "person", "track_id": 1, "ppe": "ng",
+                         "bbox": [0.1, 0.1, 0.2, 0.2]},
+                    ],
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        check(window.open_root(flat_dir), "開啟 1920x1080 的假資料")
+        check(not window.act_wrap.isChecked(), "非 2:1 不自動進環景")
+        check(not canvas.tf.wrap_x, "畫布也不是環景")
+        check(window.lbl_wrap.text() == "", "狀態列不顯示環景字樣")
+
+        check(window.open_root(work), "換回原本的 equirect 資料夾")
         app.processEvents()
 
         # 逐幀瀏覽測的是每幀解碼成本,走幾幀夠了就好;整份 600 幀走完只是把
@@ -534,8 +643,14 @@ def main() -> int:
 
         reopened = load_frame(label_path)
         check(reopened.dets_json() == in_memory, "重開後 dets 與存檔前逐值相同")
-        check(all(0.0 <= v <= 1.0 for d in reopened.dets_json() for v in d["bbox"]),
-              "重開後 bbox 仍是歸一化值")
+        # 環景模式下跨縫框的 x2 本來就該越過 1.0,寫死 [0,1] 會在資料集出現真正的
+        # 跨縫框時假 FAIL。判準與 verify_roundtrip.test_edit_roundtrip 同一套。
+        wrap = reopened.wrap_x
+        check(all(0.0 <= d["bbox"][0] < 1.0 for d in reopened.dets_json()),
+              f"重開後 x1 都在 [0,1)(環景={wrap})")
+        check(all(0.0 <= d["bbox"][1] <= 1.0 and 0.0 <= d["bbox"][3] <= 1.0
+                  for d in reopened.dets_json()),
+              "重開後 y 都在 [0,1]")
 
         # 重開整個資料集,確認畫面上的框位置(view rect)完全一致。
         rects_before = [canvas.tf.n2v_rect(d.bbox) for d in frame.dets]

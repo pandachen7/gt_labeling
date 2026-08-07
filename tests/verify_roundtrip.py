@@ -581,6 +581,44 @@ def test_canvas_wrap_geometry() -> None:
           "而高端那一圈也不在 visible_shifts 裡 —— 兩端都要多包一圈")
 
 
+def test_downstream_wrap_iou() -> None:
+    """延伸表示能被下游的環狀 IoU 正確配對。
+
+    detect_stream 的 evaluate.py / eval_gt.py 用 wrap_iou(x 平移 ±1 取最大)吃跨縫框。
+    這裡**只讀不寫**那個 repo,驗證我們落檔的表示它接得住;找不到就跳過,不讓本 repo
+    的測試硬綁另一個 repo 的位置。
+    """
+    section("下游相容:wrap_iou 吃得下延伸表示")
+    eval_dir = Path(r"D:\ws\detect_stream\scripts\eval2")
+    if not (eval_dir / "evaluate.py").is_file():
+        print(f"  skip 找不到 {eval_dir}\\evaluate.py,跳過")
+        return
+    sys.path.insert(0, str(eval_dir))
+    try:
+        import numpy as np
+        from evaluate import wrap_iou
+    except ImportError as exc:
+        print(f"  skip 匯入失敗({exc}),跳過")
+        return
+    finally:
+        sys.path.remove(str(eval_dir))
+
+    extended = np.asarray([[0.94063, 0.5, 1.00348, 0.7]], dtype=float)
+    same = np.asarray([[0.94063, 0.5, 1.00348, 0.7]], dtype=float)
+    check(round(float(wrap_iou(extended, same)[0, 0]), 6) == 1.0,
+          "同一個延伸表示的框互比 IoU = 1.0")
+
+    # 對側等價寫法(整體平移一圈)也該配上
+    shifted = np.asarray([[-0.05937, 0.5, 0.00348, 0.7]], dtype=float)
+    check(round(float(wrap_iou(extended, shifted)[0, 0]), 6) == 1.0,
+          "平移一整圈的等價框 IoU = 1.0(wrap_iou 的 ±1 平移生效)")
+
+    # x2 < x1 那種寫法會被算成零面積 —— 這正是我們不採用它的理由,鎖成回歸
+    reversed_form = np.asarray([[0.94063, 0.5, 0.00348, 0.7]], dtype=float)
+    check(float(wrap_iou(reversed_form, same)[0, 0]) == 0.0,
+          "x2<x1 的寫法在 wrap_iou 下是零面積(所以本工具不採用)")
+
+
 def main() -> int:
     source = Path(
         sys.argv[1] if len(sys.argv) > 1
@@ -626,6 +664,7 @@ def main() -> int:
     test_transform_roundtrip()
     test_transform_wrap()
     test_canvas_wrap_geometry()
+    test_downstream_wrap_iou()
 
     print("\n" + "=" * 60)
     if FAILURES:

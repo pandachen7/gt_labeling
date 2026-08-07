@@ -77,7 +77,7 @@ uv run --project D:\ws\gt_labeling gt-labeling <root> --band 0.5 0.9
 - `label`:`person` 或 `drone`
 - `track_id`:整數或 `null`(待指定)
 - `ppe`:`ok` / `ng` / `null`,只對 `person` 有意義;`drone` 一律寫 `null`
-- `bbox`:normalized `[x1, y1, x2, y2]`,**這是唯一真值**,畫面像素只是投影
+- `bbox`:normalized `[x1, y1, x2, y2]`,**這是唯一真值**,畫面像素只是投影。equirect(size 寬高比 2:1)的跨接縫框以 `x1 ∈ [0,1)` + `x2 = x1 + 寬度`(可 > 1)表示,見下方「環景模式」
 - `size`:必要欄位,缺了無法換算 normalized 座標,會直接報錯
 
 ## 操作
@@ -125,6 +125,19 @@ uv run --project D:\ws\gt_labeling gt-labeling <root> --band 0.5 0.9
 | 綠   | person, ppe=ok |
 | 橘   | person, ppe=ng |
 | 紅   | drone          |
+
+### 環景模式(ERP)
+
+`size` 寬高比 2:1 的資料開檔就自動進環景模式,狀態列顯示「ERP 環景」,檢視選單可手動覆寫。
+
+- 畫布左右**無縫環繞**:一直往旁邊拖不會停,接縫可以拉到畫面中間再畫框。淡藍虛線標出 JSON 的 `x=0/1` 落在哪。
+- 跨接縫的框畫成**連續的一個矩形**,接縫兩側都點得到同一個框。
+- 落檔時 x 不 clamp:`x1` 取模回 `[0,1)`、`x2` 寫成 `x1 + 寬度`(可越過 1.0)。這是上游 `gt_densify.py` 產出、下游 `eval_gt.py` / `evaluate.py` 的 `wrap_iou` 消費的既有表示 —— 夾回 `[0,1]` 會把跨縫的人切成半個框,而且不會有任何流程報錯。
+- `x2 < x1` 那種寫法**不能用**:`wrap_iou` 會算成負寬、面積 0,該框在評估裡永遠是 FN。
+- y 不環繞:equirect 的上下是極點,越過去取到的是另一側的天空/地面。
+- 補框在環景下走 ERP 最短弧,走過接縫的人不會補出一串橫掃整張圖的假框。
+- 幀清單的 `CUT` 標出「有框恰好貼在 x=0 或 x=1」—— 那幾乎一定是先前被 clamp 削過的痕跡,`x2 > 1` 才是健康的跨縫框。
+- 手動關掉環景模式後存檔**會把跨縫框 clamp 掉**,含跨縫框的幀會立刻變成未存(`*`),因為存出去的座標確實會不同。
 
 ## 功能
 
@@ -257,7 +270,7 @@ tracker 常在目標離場後還吐一串幽靈框,或某一段被誤配到別�
 1. **只替換 `raw["dets"]`**。`type / version / source / seq / frame_index / video_sec / size / image` 連 key 順序都是原本那顆 dict,不重建。
 2. **det 也一樣**:只覆寫 `label / track_id / ppe / bbox`,其餘欄位連 key 順序原樣帶回。上游 `gt_densify.py` 會寫 `src`(anchor / det / interp),`eval_gt.py` 靠它算「多少比例的框取自系統輸出」—— 剝掉不會讓任何流程報錯,只會讓那個比例悄悄低報,所以這條是硬性契約。
 3. 行尾(CRLF/LF)、UTF-8 BOM、結尾換行都照原檔還原。dets 沒改時存回去是 **byte 完全相同**,不只是欄位值相同。
-4. `bbox` 一律寫成 5 位小數、clamp 到 `[0,1]`、保證 `x1<x2` / `y1<y2`。
+4. `bbox` 一律寫成 5 位小數、保證 `x1<x2` / `y1<y2`。`y` 一律 clamp 到 `[0,1]`;`x` 在環景模式下**不** clamp,以 `x1 ∈ [0,1)` + `x2 = x1 + 寬度` 落檔,`x2` 可越界。非環景模式下 `x` 維持 clamp 到 `[0,1]`。
 5. 存檔後把記憶體的 bbox 回填成寫出去的值,所以「存檔 → 繼續編輯 → 再存」與「存檔 → 重開」看到的座標完全一致。
 
 ## 驗收
@@ -271,12 +284,21 @@ uv run --project D:\ws\gt_labeling python tests/verify_gui.py <gt_root>
 
 預設指向 `D:\ws\detect_stream\out\gt_per_frames_0625_145125\000-020s`。那份 per-frame GT 按 `000-020s` 這樣分段,**每段自成一個 root**,要驗別段就把路徑帶上去。
 
+`tests/verify_roundtrip.py` 吃兩個可選路徑參數:第一個是一般樣本,第二個是**含跨縫框**的樣本(預設 `gt_per_frames_0625_182214\160-180s`)。第二個找不到就跳過該項而不是 FAIL —— 資料集會搬、會被重新切段,拿找不到檔案當失敗只會製造假警報。
+
 **原始資料一律只讀**:兩支腳本都先把 labels(`verify_gui.py` 連 frames 一起)複製到暫存目錄,所有編輯與存檔都發生在副本上,跑完連 mtime 都不會動到原檔。
 
 斷言一律**比相對變化量**,不寫死幀數、框數或重疊數 —— 換一份資料集就報假 FAIL 的驗收沒有價值。
 
 - [tests/verify_roundtrip.py](tests/verify_roundtrip.py):存檔往返不漂移、非 dets 欄位一字未動、座標換算可逆。
 - [tests/verify_gui.py](tests/verify_gui.py):offscreen 跑真的 GUI —— 真的開資料夾、真的用滑鼠事件改框、真的存檔再開一次比對。
+
+`tests/verify_roundtrip.py` 另外含一項只讀 `detect_stream` 的下游相容檢查(驗證跨縫框的延伸表示能被 `evaluate.py` 的 `wrap_iou` 正確配對),需要 `numpy`(`evaluate.py` 還要 `scipy`)。本工具不依賴這兩個套件,不會加進 `pyproject.toml`;venv 裡沒裝就直接跳過該項(印 `skip`,不是 FAIL)。要真的驗到,用 `uv run --with` 臨時加套件跑第二次:
+
+```
+uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
+uv run --project D:\ws\gt_labeling --with numpy --with scipy python tests/verify_roundtrip.py
+```
 
 ## 專案結構
 
