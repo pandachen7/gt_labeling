@@ -32,6 +32,7 @@ PPE_ITEMS: tuple[tuple[str, str | None], ...] = (("未定", None), ("ok", "ok"),
 DEFAULT_MAX_GAP = 20
 COLOR_PENDING = QColor("#ffb340")
 COLOR_DUPLICATE = QColor("#ff5f56")
+COLOR_EDGE = QColor("#ffd24a")
 COLOR_NORMAL = QColor("#dcdcdc")
 
 
@@ -43,7 +44,7 @@ def _mono_font() -> QFont:
 
 
 class FrameListPanel(QWidget):
-    """每幀一列:seq、框數、待補標記(ID / PPE)、id 重疊標記(DUP)、未存標記(*)。"""
+    """每幀一列:seq、框數、待補標記(ID / PPE)、id 重疊(DUP)、貼邊(CUT)、未存(*)。"""
 
     rowSelected = pyqtSignal(int)
     deleteRequested = pyqtSignal()
@@ -76,7 +77,7 @@ class FrameListPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.addWidget(QLabel("幀清單  seq  框數  待補  重疊  未存"))
+        layout.addWidget(QLabel("幀清單  seq  框數  待補  重疊 貼邊 未存"))
         layout.addWidget(self.list, 1)
         layout.addWidget(self.summary)
 
@@ -97,16 +98,22 @@ class FrameListPanel(QWidget):
         flag_id = "ID " if frame.has_null_track else "   "
         flag_ppe = "PPE" if frame.has_null_ppe else "   "
         duplicate = frame.has_duplicate_track
+        edge = frame.has_edge_box
         flag_dup = "DUP" if duplicate else "   "
+        flag_cut = "CUT" if edge else "   "
         dirty = "*" if frame.dirty else " "
         item.setText(
-            f"{frame.seq:>7d}  n={len(frame.dets):<3d} {flag_id}{flag_ppe} {flag_dup}  {dirty}"
+            f"{frame.seq:>7d}  n={len(frame.dets):<3d} "
+            f"{flag_id}{flag_ppe} {flag_dup} {flag_cut}  {dirty}"
         )
 
-        # 重疊比待補嚴重:待補是還沒填,重疊是已經填錯,顏色要壓過橘色。
+        # 三級:重疊是已經填錯(最重),貼邊是框可能被 clamp 削過、要回頭看一眼,
+        # 待補只是還沒填。顏色依此壓過去。
         pending = frame.has_null_track or frame.has_null_ppe
         if duplicate:
             item.setForeground(COLOR_DUPLICATE)
+        elif edge:
+            item.setForeground(COLOR_EDGE)
         else:
             item.setForeground(COLOR_PENDING if pending else COLOR_NORMAL)
         font = _mono_font()
@@ -119,10 +126,12 @@ class FrameListPanel(QWidget):
         pending_frames = sum(1 for f in frames if f.pending_count)
         dirty_frames = sum(1 for f in frames if f.dirty)
         duplicate_frames = sum(1 for f in frames if f.has_duplicate_track)
+        edge_frames = sum(1 for f in frames if f.has_edge_box)
         self.summary.setText(
             f"{len(frames)} 幀 / {boxes} 框\n"
             f"待補 {pending_boxes} 框(分布 {pending_frames} 幀)\n"
             f"id 重疊 {duplicate_frames} 幀\n"
+            f"貼邊 {edge_frames} 幀\n"
             f"未存 {dirty_frames} 幀"
         )
 

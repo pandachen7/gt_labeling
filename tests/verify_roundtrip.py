@@ -394,6 +394,17 @@ def test_frame_wrap_state() -> None:
     plain.wrap_x = False
     check(plain.dets_json() == plain_json, "沒有跨縫框的 frame,切換模式輸出完全相同")
 
+    cut = frame_with([3840, 1920], [[0.94063, 0.5, 1.0, 0.7]])
+    check(cut.has_edge_box, "x2 恰好 1.0 → 判定為被削過的貼邊框")
+    left_cut = frame_with([3840, 1920], [[0.0, 0.5, 0.0356, 0.7]])
+    check(left_cut.has_edge_box, "x1 恰好 0.0 → 同樣判定為貼邊")
+    healthy = frame_with([3840, 1920], [[0.94063, 0.5, 1.00348, 0.7]])
+    check(not healthy.has_edge_box, "x2 > 1 是健康的跨縫框,不算貼邊")
+    inner = frame_with([3840, 1920], [[0.3, 0.4, 0.5, 0.6]])
+    check(not inner.has_edge_box, "畫面內的框不算貼邊")
+    flat_cut = frame_with([1920, 1080], [[0.94063, 0.5, 1.0, 0.7]])
+    check(not flat_cut.has_edge_box, "非 equirect 資料貼邊是正常的,不警示")
+
 
 def test_transform_roundtrip() -> None:
     section("ViewTransform 可逆性(座標漂移防線)")
