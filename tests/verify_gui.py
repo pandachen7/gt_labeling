@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PyQt6.QtCore import QPoint, QSettings, Qt, QTimer
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox
+from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QMessageBox
 
 from gt_labeling.canvas import COLOR_DRONE, det_color
 from gt_labeling.model import (
@@ -296,8 +296,28 @@ def main() -> int:
         window.list_panel.refresh_summary(window.frames)
         check("CUT" not in window.list_panel.list.item(0).text(), "移除後 CUT 消失")
 
-        # 關掉環景:含跨縫框的幀變成未存(存出去確實會不同)
+        # 關掉環景:含跨縫框的幀變成未存(存出去確實會不同)。資料集裡若還有別的
+        # 跨縫框(不限剛畫的那個 —— 換一份本來就含跨縫框的樣本來跑也一樣),Task 6
+        # 的確認對話框會彈出來;這裡按「是」模擬真人確認。沒有跨縫框時它不會彈,
+        # 這個 timer 只是空跑一次,不影響任何斷言。
+        def _confirm_leave_wrap() -> None:
+            dialog = QApplication.activeModalWidget()
+            if dialog is None:
+                return
+            yes = dialog.button(QMessageBox.StandardButton.Yes)
+            if yes is not None:
+                yes.click()
+            else:
+                dialog.accept()
+
+        QTimer.singleShot(0, _confirm_leave_wrap)
         window.act_wrap.setChecked(False)
+        app.processEvents()
+        # offscreen 平台關掉 modal 後不會把 active window 還給主視窗,焦點與快捷鍵
+        # 都只在 active window 裡成立——同一招用在別的 modal 上(見「幀清單多選 +
+        # Delete」那幾段),這裡若真的彈了對話框也要補一次,否則後面每一段按鍵測試
+        # 都會靜默落空。沒彈的話這兩行是沒有作用的空操作。
+        window.activateWindow()
         app.processEvents()
         check(not canvas.tf.wrap_x, "取消勾選後畫布回到非環景")
         check(not window.frames[0].wrap_x, "model 的存檔語意也跟著回去")
