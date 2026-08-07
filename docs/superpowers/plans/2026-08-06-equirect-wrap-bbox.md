@@ -1551,18 +1551,24 @@ def main() -> int:
     return 0
 ```
 
-- [ ] **Step 3: 用 `git stash` 確認這個測試抓得到 bug**
+- [ ] **Step 3: 確認這個測試抓得到 bug**
+
+**不要用 `git stash`** —— model.py 的改動早就 commit 了,stash 沒東西可 stash;而 `git checkout <舊commit> -- gt_labeling/model.py` 退回舊版更糟:`canvas.py` / `window.py` / 兩支測試都在呼叫 `canonical_bbox(bbox, wrap)`,舊版沒有那個參數,整支腳本會以 `TypeError` 爆掉,那不是乾淨的 FAIL,證明不了任何事。
+
+改成模擬「工具不知道這是 equirect」的舊行為:在 `test_wrap_real_data` 的 `load_frame` 之後臨時插一行,跑一次,再拿掉。
+
+```python
+        frame = load_frame(entry.label_path)
+        frame.wrap_x = False        # ← 臨時,證明測試有效後刪掉
+```
 
 ```bash
-git stash push gt_labeling/model.py
 uv run --project D:\ws\gt_labeling python tests/verify_roundtrip.py
 ```
 
-Expected: `FAIL 強制重寫後 byte 完全相同` —— 舊的 `canonical_bbox` 會把 172 個跨縫框削平,檔案內容改變。**這一步證明測試有效**,沒看到 FAIL 表示測試沒抓到東西,要回頭查。
+Expected: `FAIL 強制重寫後 byte 完全相同:0/600 檔` —— 非環景語意會把每個跨縫框的 `x2` 夾到 1.0,檔案內容因此改變。**這一步證明測試有效**;沒看到 FAIL 表示這個測試根本沒在驗東西,回頭查(最可能是樣本裡沒有跨縫框,那就換一段)。
 
-```bash
-git stash pop
-```
+確認後把那一行刪掉,**不要 commit 它**。
 
 - [ ] **Step 4: 跑測試確認通過**
 
