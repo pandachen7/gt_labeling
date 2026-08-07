@@ -35,6 +35,7 @@ from .model import (
     Remap,
     TrackDelete,
     UndoStack,
+    canonical_bbox,
     find_track,
     interpolate_missing,
     load_frame,
@@ -503,6 +504,11 @@ class MainWindow(QMainWindow):
         # 不走 _apply_wrap_mode:它會連著把幀清單再刷一次,而下面本來就要刷一次。
         # 同一資料集的影像尺寸一致,所以 frames[0] 就代表全體。
         wrap = bool(frames) and frames[0].is_equirect
+        # 把「同一資料集所有影像尺寸一致」從假設變成事實:canvas.set_frame 是無條件
+        # 用該幀的 wrap_x 覆寫檢視的,只要有一幀不同意 frames[0] 的判定,切到它就會
+        # 同時悄悄翻掉檢視與那一幀的存檔語意,而選單仍顯示勾選。
+        for frame in frames:
+            frame.wrap_x = wrap
         self.act_wrap.blockSignals(True)
         self.act_wrap.setChecked(wrap)
         self.act_wrap.blockSignals(False)
@@ -1322,11 +1328,15 @@ class MainWindow(QMainWindow):
         不會損失資料。
         """
         if not enabled:
-            frames = [f for f in self.frames
-                      if any(d.bbox[2] > 1.0 or d.bbox[0] < 0.0 for d in f.dets)]
-            boxes = sum(1 for f in frames
-                        for d in f.dets if d.bbox[2] > 1.0 or d.bbox[0] < 0.0)
-            if frames and not self._confirm_leave_wrap(len(frames), boxes):
+            # 精確式:直接比較兩種模式的 canonical 結果,而不是憑 x2>1 / x1<0 猜
+            # 「會不會變」——那只是 wrap=True 這條分支的實作細節,關掉環景真正要
+            # 問的是「存出去的檔案會不會不一樣」,canonical_bbox 本身就是那個答案。
+            changed = [(f, [d for d in f.dets
+                            if canonical_bbox(d.bbox, True) != canonical_bbox(d.bbox, False)])
+                       for f in self.frames]
+            changed = [(f, dets) for f, dets in changed if dets]
+            boxes = sum(len(dets) for _, dets in changed)
+            if changed and not self._confirm_leave_wrap(len(changed), boxes):
                 # 使用者反悔:把勾選狀態放回去,但別再觸發自己(遞迴 toggled)。
                 self.act_wrap.blockSignals(True)
                 self.act_wrap.setChecked(True)

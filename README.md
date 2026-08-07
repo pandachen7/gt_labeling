@@ -285,7 +285,7 @@ uv run --project D:\ws\gt_labeling python tests/verify_gui.py <gt_root>
 
 預設指向 `D:\ws\detect_stream\out\gt_per_frames_0625_145125\000-020s`。那份 per-frame GT 按 `000-020s` 這樣分段,**每段自成一個 root**,要驗別段就把路徑帶上去。
 
-`tests/verify_roundtrip.py` 吃兩個可選路徑參數:第一個是一般樣本,第二個是**含跨縫框**的樣本(預設 `gt_per_frames_0625_182214\160-180s`)。第二個找不到就跳過該項而不是 FAIL —— 資料集會搬、會被重新切段,拿找不到檔案當失敗只會製造假警報。
+`tests/verify_roundtrip.py` 吃兩個可選路徑參數:第一個是一般樣本,第二個是**含跨縫框**的樣本(預設 `gt_per_frames_0625_182214\040-060s`)。上游把 `120s` 之後的段落搬走了,現在**沒有任何 `labels/` 目錄還含跨縫框**——它們只存在於 `labels.orig` / `labels.prelink`(人工編輯前的備份)裡,所以第二個樣本實際指向的是這個 root 底下的備份目錄:腳本依序找 `labels.orig`、再找 `labels`,兩者都找不到就跳過該項而不是 FAIL——資料集會搬、會被重新切段,拿找不到檔案當失敗只會製造假警報。
 
 **原始資料一律只讀**:兩支腳本都先把 labels(`verify_gui.py` 連 frames 一起)複製到暫存目錄,所有編輯與存檔都發生在副本上,跑完連 mtime 都不會動到原檔。
 

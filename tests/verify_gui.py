@@ -22,7 +22,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt6.QtCore import QPoint, QSettings, Qt, QTimer
+from PyQt6.QtCore import QPoint, QRectF, QSettings, Qt, QTimer
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialogButtonBox, QMessageBox
@@ -235,6 +235,82 @@ def main() -> int:
         canvas.tf.clamp_offset(canvas.size())
         app.processEvents()
 
+        section("拖曳中的跨縫框:繞回來的那一段仍畫得到、點得到")
+        # 上面那條 got == list(range(...)) 盯的是 _shifts() 的**實作公式**,不是它
+        # 保護的**行為**——誰簡化了 _shifts() 並順手把那條斷言改成新公式,這裡才
+        # 攔得住「框在拖曳跨縫的那一刻從畫面消失」這個 bug 重新溜回來。
+        #
+        # 刻意把 off_x 設 0、zoom 設成剛好讓一份影像填滿畫布寬度:visible_shifts
+        # 這時只回 [0](影像本身不需要任何額外的圈),所以框繞回來的那一段能不能
+        # 畫到、點到,就只看 _shifts() 有沒有多補那一圈,不會被「本來就有別的圈
+        # 可見」混進來的巧合掩蓋掉。
+        canvas.tf.wrap_x = True
+        canvas.tf.zoom = canvas.tf.fit_zoom(canvas.size())
+        canvas.tf.off_x = 0.0
+        canvas.tf.off_y = 0.0
+        app.processEvents()
+        window_rect = QRectF(0.0, 0.0, float(canvas.width()), float(canvas.height()))
+
+        def visible_copy(bbox):
+            """回傳 ``canvas._shifts()`` 裡,能讓 ``bbox`` 的某個環繞副本落在畫面
+            內的那份交集矩形;找不到就回 ``None``。"""
+            base = canvas.tf.n2v_rect(bbox)
+            for k in canvas._shifts():
+                visible = base.translated(k * canvas.tf.span_x, 0.0).intersected(window_rect)
+                if not visible.isEmpty():
+                    return visible
+            return None
+
+        def drag_across_seam(start_bbox: list[float], dx: float, label: str) -> None:
+            """把一個框從 ``start_bbox`` 往接縫方向拖 ``dx``(normalized 位移),
+            中途(**不 release**)驗證繞回來的那一段仍畫得到、點得到,再收尾清掉。
+            """
+            frame0 = window.frames[window.index]
+            det = Det(label="person", track_id=None, ppe="ng", bbox=list(start_bbox))
+            frame0.dets.append(det)
+            idx = len(frame0.dets) - 1
+            canvas.reload_dets()
+            canvas.select(idx)
+            app.processEvents()
+
+            start_pt = canvas.tf.n2v_rect(det.bbox).center().toPoint()
+            end_pt = QPoint(start_pt.x() + round(dx * canvas.tf.span_x), start_pt.y())
+            QTest.mousePress(canvas, Qt.MouseButton.LeftButton,
+                             Qt.KeyboardModifier.NoModifier, start_pt)
+            QTest.mouseMove(canvas, end_pt)
+            app.processEvents()
+
+            # 此時 det.bbox 是拖曳中的連續座標(還沒放開滑鼠、還沒 canonical 化)。
+            mid_bbox = list(det.bbox)
+            check(mid_bbox[0] < 0.0 or mid_bbox[2] > 1.0,
+                  f"[{label}] 拖曳中途座標確實越界(尚未 canonical 化){mid_bbox}")
+            visible = visible_copy(mid_bbox)
+            check(visible is not None,
+                  f"[{label}] 繞回來的那一段仍有某個 _shifts() 的圈落在畫面內 {mid_bbox}")
+            if visible is not None:
+                point = visible.center()
+                hit = canvas._hit_box(point)
+                check(hit == idx,
+                      f"[{label}] 點繞回來的那一段仍選到同一個框(預期 {idx},實際 {hit})")
+
+            QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton,
+                               Qt.KeyboardModifier.NoModifier, end_pt)
+            app.processEvents()
+            del frame0.dets[idx]
+            canvas.reload_dets()
+            app.processEvents()
+
+        # 往左拖:框整個被推到 x<0,繞回來的那一段出現在畫面右緣——這需要 _shifts()
+        # 補的高端那一圈,正是上一輪「只擴低端」的 bug 會漏掉的方向。
+        drag_across_seam([0.05, 0.30, 0.10, 0.45], -0.13, "往左拖")
+        # 往右拖:框整個被推到 x>1,繞回來的那一段出現在畫面左緣——這一端本來就有
+        # 補,兩個方向都測才能證明沒有偏廢任何一邊(而不是巧合矇對其中一邊)。
+        drag_across_seam([0.90, 0.30, 0.95, 0.45], 0.13, "往右拖")
+
+        canvas.tf.wrap_x = window.frames[window.index].wrap_x
+        canvas.tf.clamp_offset(canvas.size())
+        app.processEvents()
+
         section("環景模式")
         check(window.act_wrap.isChecked(), "3840x1920 開檔自動進環景模式")
         check(canvas.tf.wrap_x, "畫布的檢視也是環景")
@@ -250,7 +326,11 @@ def main() -> int:
         check(0.0 <= canvas.tf.off_x < canvas.tf.span_x,
               f"off_x 被取模回 [0, span_x) {canvas.tf.off_x}")
         shifts = list(canvas.tf.visible_shifts(float(canvas.width())))
-        check(len(shifts) >= 1, f"visible_shifts 至少一圈 {shifts}")
+        # 不斷言 len(shifts) >= 1:visible_shifts 依公式(見 transform.py)對任何
+        # wrap_x=True 的輸入恆回非空 range,那條斷言與被測程式碼的正確性無關,只是
+        # 印出來讓人看得到 pan 完之後畫面實際蓋了幾份影像。visible_shifts 的數學
+        # 邊界由 verify_roundtrip.py 的 test_transform_wrap 負責。
+        print(f"       pan 完之後 visible_shifts = {shifts}")
 
         # 在接縫上新畫一個框:跨越 x=1.0 後應該存成延伸表示,不是兩截也不是巨框
         window._goto(0)
@@ -319,10 +399,15 @@ def main() -> int:
         # 跨縫框(不限剛畫的那個 —— 換一份本來就含跨縫框的樣本來跑也一樣),Task 6
         # 的確認對話框會彈出來;這裡按「是」模擬真人確認。沒有跨縫框時它不會彈,
         # 這個 timer 只是空跑一次,不影響任何斷言。
+        # confirm_popups 記下對話框「有沒有真的彈出來」,而不是只顧著把它關掉——
+        # 沒有這份記錄,分不出「乾淨樣本本來就不該彈」與「彈了而且被自動按掉」。
+        confirm_popups: list[str] = []
+
         def _confirm_leave_wrap() -> None:
             dialog = QApplication.activeModalWidget()
             if dialog is None:
                 return
+            confirm_popups.append(dialog.windowTitle())
             yes = dialog.button(QMessageBox.StandardButton.Yes)
             if yes is not None:
                 yes.click()
@@ -338,6 +423,14 @@ def main() -> int:
         # 都會靜默落空。沒彈的話這兩行是沒有作用的空操作。
         window.activateWindow()
         app.processEvents()
+        print(f"       關環景確認對話框彈出次數:{len(confirm_popups)}")
+        if len(sys.argv) <= 1:
+            # 只在用預設樣本時斷言為 0:已經實測(見腳本外的驗證)0625_145125\000-020s
+            # 的 6088 個框裡沒有一個的 canonical 結果會因環景模式而不同,所以這裡
+            # 不該彈。換一份自訂樣本跑,不能假設它同樣乾淨,所以只印出來、不斷言。
+            check(len(confirm_popups) == 0,
+                  f"預設樣本已人工標過、沒有框需要確認,不該彈出關環景對話框"
+                  f"(實際彈了 {len(confirm_popups)} 次)")
         check(not canvas.tf.wrap_x, "取消勾選後畫布回到非環景")
         check(not window.frames[0].wrap_x, "model 的存檔語意也跟著回去")
         # 載入時每一幀的 wrap_x 預設就是 True(equirect 判定):只看 frames[0]

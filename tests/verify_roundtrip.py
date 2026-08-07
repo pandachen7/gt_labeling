@@ -568,17 +568,19 @@ def test_canvas_wrap_geometry() -> None:
     seam_box = [0.97, 0.5, 1.02, 0.7]  # canonical 跨縫框
     wrapped = tf.n2v_rect(seam_box).translated(-1 * span, 0.0)
     check(wrapped.left() < 0.0 < wrapped.right(),
-          f"它繞回來的那一段跨過畫面左緣 {wrapped.left()}~{wrapped.right()}")
-    check(-1 not in shifts,
-          "而 -1 圈不在 visible_shifts 裡 —— 所以繪製與 hit-test 不能只用它")
+          f"它繞回來的那一段跨過畫面左緣,而這一圈(k=-1)不在 visible_shifts=[0] 裡"
+          f"——繪製與 hit-test 不能只用它 {wrapped.left()}~{wrapped.right()}")
 
     # 2) 拖曳中的框 x1 可以為負,繞回來的那一段落在高端那一圈
     mid_drag = [-0.394, 0.30, 0.106, 0.45]
     high = tf.n2v_rect(mid_drag).translated(1 * span, 0.0)
     check(high.left() < view_w < high.right() or 0.0 < high.left() < view_w,
           f"拖曳中的框在 +1 圈仍有一段在視窗內 {high.left()}~{high.right()}")
-    check(max(shifts) + 1 not in shifts,
-          "而高端那一圈也不在 visible_shifts 裡 —— 兩端都要多包一圈")
+    # 直接寫 1(= 上面已驗證過的 shifts=[0] 的下一圈),不是 max(shifts) + 1:
+    # 後者對任何整數序列恆真(定義上 max+1 不可能是序列的成員),與 visible_shifts
+    # 的實際回傳值無關,不具鑑別力。
+    check(1 not in shifts,
+          "而高端那一圈(k=1)不在 visible_shifts=[0] 裡 —— 兩端都要多包一圈")
 
 
 def test_downstream_wrap_iou() -> None:
@@ -667,7 +669,7 @@ def main() -> int:
             shutil.copytree(wrap_src, work / "labels")
             test_wrap_real_data(work)
     else:
-        section("真實資料回歸:上游跨縫框 round-trip")
+        section(f"真實資料回歸:上游跨縫框 round-trip({wrap_sample.name})")
         print(f"  skip 找不到 {wrap_sample}\\labels.orig 或 \\labels,"
               f"跳過(可用第二個參數指定)")
 
