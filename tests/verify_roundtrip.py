@@ -597,7 +597,10 @@ def test_downstream_wrap_iou() -> None:
     try:
         import numpy as np
         from evaluate import wrap_iou
-    except ImportError as exc:
+    except Exception as exc:  # noqa: BLE001
+        # evaluate.py 在另一個 repo 且正被別人編輯:缺套件只是 ImportError,但檔案
+        # 改到一半的 SyntaxError 也可能發生,兩者都該是「跳過這項下游相容檢查」,
+        # 不該讓本 repo 的整支驗收腳本被它中止。
         print(f"  skip 匯入失敗({exc}),跳過")
         return
     finally:
@@ -628,12 +631,22 @@ def main() -> int:
         print(f"找不到 {source}\\labels")
         return 2
 
-    # 第二份樣本專供跨縫回歸:必須是「有人走過接縫」的段落。預設指向已知有跨縫框
-    # 的一段;路徑不存在就跳過該項而不是 FAIL —— 資料集會搬、會被重新切段,拿
-    # 找不到檔案當失敗只會製造與程式無關的假警報。
+    # 第二份樣本專供跨縫回歸:必須是「有人走過接縫」的段落。跨縫框現在只存在於
+    # labels.orig / labels.prelink(人工編輯前的備份)—— labels/ 裡的早就被舊版
+    # 工具削平了,而含未編輯資料的段落已被上游搬走(掃過現況:0625_182214 只剩
+    # 000-120s 六段,120s 之後那 4002 個跨縫框所在全部消失)。040-060s/labels.orig
+    # 是現存最多的一份(186 個)。這兩個備份是唯讀的,而且下面一律先 copytree 到
+    # 暫存目錄才動,原檔不會被寫到。路徑或兩個目錄都不存在就跳過該項而不是
+    # FAIL —— 資料集會搬、會被重新切段,拿找不到檔案當失敗只會製造與程式無關的
+    # 假警報。
     wrap_sample = Path(
         sys.argv[2] if len(sys.argv) > 2
-        else r"D:\ws\detect_stream\out\gt_per_frames_0625_182214\160-180s"
+        else r"D:\ws\detect_stream\out\gt_per_frames_0625_182214\040-060s"
+    )
+    wrap_src = next(
+        (wrap_sample / name for name in ("labels.orig", "labels")
+         if (wrap_sample / name).is_dir()),
+        None,
     )
 
     with tempfile.TemporaryDirectory(prefix="gt_verify_") as tmp:
@@ -647,15 +660,16 @@ def main() -> int:
         test_preserves_unknown_det_fields(work)
         test_edit_roundtrip(work)
 
-    if (wrap_sample / "labels").is_dir():
+    if wrap_src is not None:
         with tempfile.TemporaryDirectory(prefix="gt_wrap_") as tmp:
             work = Path(tmp) / "gt_wrap"
             (work / "frames").mkdir(parents=True)
-            shutil.copytree(wrap_sample / "labels", work / "labels")
+            shutil.copytree(wrap_src, work / "labels")
             test_wrap_real_data(work)
     else:
         section("真實資料回歸:上游跨縫框 round-trip")
-        print(f"  skip 找不到 {wrap_sample}\\labels,跳過(可用第二個參數指定)")
+        print(f"  skip 找不到 {wrap_sample}\\labels.orig 或 \\labels,"
+              f"跳過(可用第二個參數指定)")
 
     test_interpolate_is_per_label()
     test_interpolate_wraps_shortest_arc()

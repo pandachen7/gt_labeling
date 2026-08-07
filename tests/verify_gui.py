@@ -13,6 +13,7 @@ from __future__ import annotations
 import collections
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -271,15 +272,30 @@ def main() -> int:
             check(0.0 < width < 0.5,
                   f"跨接縫的新框寬度合理、沒有被拉成橫跨整張圖 {bbox}")
             check(0.0 <= bbox[0] < 1.0, f"x1 落在 [0,1) {bbox[0]}")
+            # 標題寫的是「應該存成延伸表示」,這條才是真的驗到那件事——沒有它,
+            # 一個完全畫在 [0,1] 內、從未跨越接縫的框也會滿足上面兩條斷言,整段
+            # 名不符實。x1 那條在 wrap 下近乎恆真(canonical_bbox 本來就把 x1 取模
+            # 回 [0,1)),鑑別力在這裡。
+            check(bbox[2] > 1.0, f"x2 越過 1.0,存成延伸表示 {bbox}")
             # 立刻清掉剛畫的框:留著的話,下面「關掉環景」只是想測開關本身,卻會
             # 因為這個跨縫框撞上 Task 6 的確認對話框(有跨縫框時關環景會彈
             # QMessageBox,offscreen 測試沒有人按按鈕,會卡死在 modal 上)。
             del window.frames[0].dets[-1]
+            canvas.reload_dets()
 
-        # 貼邊警示:造一個 x2 恰好 1.0 的框,幀清單那一列要出現 CUT
+        # 貼邊警示:造一個 x2 恰好 1.0 的框,幀清單那一列要出現 CUT。斷言比的是
+        # 摘要數字的**變化量**,不是寫死「1 幀」——樣本本身可能已經有貼邊框(例如
+        # 收尾檢查要開的 100-120s 那種段落,那邊本來就有 94 幀貼邊),寫死絕對值
+        # 換一份資料就假 FAIL,正是「驗收不得寫死資料量」要擋的事。
+        def edge_frames_in_summary() -> int:
+            m = re.search(r"貼邊 (\d+) 幀", window.list_panel.summary.text())
+            return int(m.group(1)) if m else -1
+
         window._goto(0)
         app.processEvents()
         frame0 = window.frames[0]
+        before_edge = edge_frames_in_summary()
+        row0_had_cut = "CUT" in window.list_panel.list.item(0).text()
         frame0.dets.append(
             Det(label="person", track_id=778, ppe="ng", bbox=[0.96, 0.30, 1.0, 0.45])
         )
@@ -289,12 +305,15 @@ def main() -> int:
         check(frame0.has_edge_box, "x2 恰好 1.0 → model 判定為貼邊")
         check("CUT" in window.list_panel.list.item(0).text(),
               f"幀清單那一列出現 CUT 旗標 {window.list_panel.list.item(0).text()!r}")
-        check("貼邊 1 幀" in window.list_panel.summary.text(),
-              f"摘要計數正確 {window.list_panel.summary.text()!r}")
+        check(edge_frames_in_summary() == before_edge + 1,
+              f"摘要的貼邊幀數 +1({before_edge} → {edge_frames_in_summary()})")
         del frame0.dets[-1]
+        canvas.reload_dets()
         window.list_panel.refresh_row(0, frame0)
         window.list_panel.refresh_summary(window.frames)
-        check("CUT" not in window.list_panel.list.item(0).text(), "移除後 CUT 消失")
+        check(edge_frames_in_summary() == before_edge, "移除後貼邊幀數回到原值")
+        check(("CUT" in window.list_panel.list.item(0).text()) == row0_had_cut,
+              "移除後那一列的 CUT 回到原本的狀態")
 
         # 關掉環景:含跨縫框的幀變成未存(存出去確實會不同)。資料集裡若還有別的
         # 跨縫框(不限剛畫的那個 —— 換一份本來就含跨縫框的樣本來跑也一樣),Task 6
@@ -321,18 +340,42 @@ def main() -> int:
         app.processEvents()
         check(not canvas.tf.wrap_x, "取消勾選後畫布回到非環景")
         check(not window.frames[0].wrap_x, "model 的存檔語意也跟著回去")
+        # 載入時每一幀的 wrap_x 預設就是 True(equirect 判定):只看 frames[0]
+        # 驗不出「_apply_wrap_mode 忘了遍歷別的幀」這種 bug——有這種 bug 的版本
+        # 只改 frames[0],frames[1..] 從沒被碰過,原本的預設值剛好把漏洞遮起來,
+        # 一定要在 OFF 狀態逐一檢查每一幀才有鑑別力。
+        check(not any(f.wrap_x for f in window.frames),
+              "關掉後每一幀的存檔語意都跟著關(不只當前幀)")
         check(window.lbl_wrap.text() == "", "狀態列的環景字樣消失")
+
+        # 翻幀也要在 OFF 狀態驗一次:有 bug 的版本只改了 frames[0],翻到別的幀
+        # 時 canvas.set_frame 會用那幀從沒被改過的 wrap_x(還是 True)覆寫畫布,
+        # 這裡才抓得到「模式被悄悄帶回來」。開回環景後翻幀對同一個 bug 是盲的,
+        # 因為載入時的預設值本來就是 True,關掉再開回來等於把所有幀還原成那個
+        # 預設值。
+        for _ in range(3):
+            window._navigate(1)
+            app.processEvents()
+        check(not canvas.tf.wrap_x,
+              "關掉後翻幾幀仍是非環景(set_frame 不會從別的幀把模式帶回來)")
+        window._goto(0)
+        app.processEvents()
+
         window.act_wrap.setChecked(True)
         app.processEvents()
         check(canvas.tf.wrap_x, "重新勾選回到環景")
 
         # _apply_wrap_mode 為每一幀寫 wrap_x 的唯一理由:canvas.set_frame 會用
-        # 該幀的 wrap_x 覆寫檢視狀態,少寫一幀就會在切到它時悄悄還原模式。
+        # 該幀的 wrap_x 覆寫檢視狀態,少寫一幀就會在切到它時悄悄還原模式。ON 方向
+        # 對「漏寫某些幀」是盲的(理由同上,見 OFF 狀態那一組),留著是為了兩個
+        # 方向都測到「翻幀不會被 set_frame 干擾」這個機制本身。
         for _ in range(3):
             window._navigate(1)
             app.processEvents()
         check(canvas.tf.wrap_x, "翻幾幀之後仍在環景模式(模式沒有被 set_frame 還原)")
         check(all(f.wrap_x for f in window.frames), "每一幀的存檔語意都是環景")
+        window._goto(0)
+        app.processEvents()
 
         section("非 2:1 合成資料不自動進環景")
         # 「非 2:1 行為完全不變」這條 constraint 在 GUI 層還沒有任何覆蓋。自己造
