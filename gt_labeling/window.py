@@ -501,6 +501,7 @@ class MainWindow(QMainWindow):
         # 2:1 就進環景模式。JSON 沒有、也不會加「這是 equirect」的欄位,size 是唯一
         # 線索。load_frame 已依 size 設好每一幀的 wrap_x,這裡只把 UI 與檢視對齊 ——
         # 不走 _apply_wrap_mode:它會連著把幀清單再刷一次,而下面本來就要刷一次。
+        # 同一資料集的影像尺寸一致,所以 frames[0] 就代表全體。
         wrap = bool(frames) and frames[0].is_equirect
         self.act_wrap.blockSignals(True)
         self.act_wrap.setChecked(wrap)
@@ -710,6 +711,9 @@ class MainWindow(QMainWindow):
 
     def _reload_frame(self, index: int) -> None:
         frame = load_frame(self.entries[index].label_path)
+        # load_frame 會依 size 重設 wrap_x,那會讓這一幀脫離目前的模式(選單顯示未勾選、
+        # 它自己卻是環景),之後切回來還會把畫布也帶偏。以目前的模式為準。
+        frame.wrap_x = self.act_wrap.isChecked()
         self.frames[index] = frame
         stack = UndoStack(UNDO_LIMIT)
         stack.reset(frame.snapshot())
@@ -1290,12 +1294,44 @@ class MainWindow(QMainWindow):
         for action in (self.act_find, self.act_find_next, self.act_find_prev):
             action.setEnabled(has_data)
 
+    def _confirm_leave_wrap(self, frames: int, boxes: int) -> bool:
+        """關掉環景模式前把關,預設落在「否」——這個方向真的會損資料。
+
+        autosave 預設開著,關掉環景後只要切一幀就會把跨縫框依 [0,1] clamp 寫回磁碟,
+        越過接縫的那一段從此消失;wrap_x 不在 undo stack 裡,重啟後也救不回來。
+        """
+        answer = QMessageBox.question(
+            self,
+            "關閉環景模式",
+            f"目前有 {frames} 幀、共 {boxes} 個框跨越接縫。關閉環景模式後,下次存檔會把"
+            f"這些框依 [0,1] 裁掉,越過接縫的那一段會被削掉且無法復原(undo 不記錄"
+            f"模式)。確定要關閉嗎?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def _apply_wrap_mode(self, enabled: bool) -> None:
         """切換環景模式:同步每一幀的存檔語意與畫布的檢視語意。
 
         會讓含跨縫框的幀變成「未存」是正確的 —— 存出去的座標確實會不同。沒有跨縫框
         的幀 dets_json() 不變,所以不會被誤標。
+
+        關掉之前要先確認:autosave 預設是開的,所以關掉之後只要切一幀就會把跨縫框
+        clamp 寫回磁碟,而 undo 不含模式、重啟後救不回來。進環景不必問 —— 那個方向
+        不會損失資料。
         """
+        if not enabled:
+            frames = [f for f in self.frames
+                      if any(d.bbox[2] > 1.0 or d.bbox[0] < 0.0 for d in f.dets)]
+            boxes = sum(1 for f in frames
+                        for d in f.dets if d.bbox[2] > 1.0 or d.bbox[0] < 0.0)
+            if frames and not self._confirm_leave_wrap(len(frames), boxes):
+                # 使用者反悔:把勾選狀態放回去,但別再觸發自己(遞迴 toggled)。
+                self.act_wrap.blockSignals(True)
+                self.act_wrap.setChecked(True)
+                self.act_wrap.blockSignals(False)
+                return
         for frame in self.frames:
             frame.wrap_x = enabled
         self.canvas.set_wrap_x(enabled)
